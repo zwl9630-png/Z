@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import tushare as ts
+import akshare as ak
 from datetime import datetime, timedelta
 
 st.set_page_config(
@@ -11,13 +11,7 @@ st.set_page_config(
 )
 
 st.title("📈 A股工程控制论")
-st.caption("真实A股数据 · 手机网页版")
-
-token = st.text_input(
-    "Tushare Token",
-    type="password",
-    placeholder="请输入你的 Tushare Token"
-)
+st.caption("A股公开数据 · 免 Token · 手机网页版")
 
 code = st.text_input(
     "股票代码",
@@ -25,413 +19,298 @@ code = st.text_input(
     max_chars=6
 )
 
-def ts_code(c):
-    if c.startswith(("5", "6", "9")):
-        return c + ".SH"
-    return c + ".SZ"
+def get_data(code):
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=500)).strftime("%Y%m%d")
+
+    df = ak.stock_zh_a_hist(
+        symbol=code,
+        period="daily",
+        start_date=start_date,
+        end_date=end_date,
+        adjust="qfq"
+    )
+
+    if df is None or df.empty:
+        raise ValueError("没有获取到该股票的数据")
+
+    df = df.rename(columns={
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume"
+    })
+
+    df["date"] = pd.to_datetime(df["date"])
+
+    for col in ["open", "close", "high", "low", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna().sort_values("date").reset_index(drop=True)
+    return df
 
 
 def calculate(df):
-    close = df["close"]
+    df = df.copy()
 
-    df["MA5"] = close.rolling(5).mean()
-    df["MA20"] = close.rolling(20).mean()
-    df["MA60"] = close.rolling(60).mean()
+    df["MA5"] = df["close"].rolling(5).mean()
+    df["MA10"] = df["close"].rolling(10).mean()
+    df["MA20"] = df["close"].rolling(20).mean()
+    df["MA60"] = df["close"].rolling(60).mean()
 
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
 
     df["DIF"] = ema12 - ema26
     df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
+    df["MACD"] = 2 * (df["DIF"] - df["DEA"])
 
-    delta = close.diff()
-
+    delta = df["close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
-
     rs = gain / loss.replace(0, np.nan)
-    df["RSI"] = 100 - 100 / (1 + rs)
+    df["RSI"] = 100 - (100 / (1 + rs))
 
     df["VOL20"] = df["volume"].rolling(20).mean()
-    df["RET20"] = close.pct_change(20)
-    df["RET60"] = close.pct_change(60)
+    df["RET20"] = df["close"].pct_change(20)
+    df["RET60"] = df["close"].pct_change(60)
 
-    previous_close = close.shift(1)
+    prev_close = df["close"].shift(1)
 
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - previous_close).abs(),
-            (df["low"] - previous_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"] - prev_close).abs()
+    ], axis=1).max(axis=1)
 
     df["ATR"] = tr.rolling(14).mean()
-    df["ATR_PCT"] = df["ATR"] / close * 100
-
-    score = np.zeros(len(df))
-
-    score += np.where(close > df["MA20"], 15, 0)
-    score += np.where(df["MA5"] > df["MA20"], 10, 0)
-    score += np.where(df["MA20"] > df["MA60"], 20, 0)
-    score += np.where(df["DIF"] > df["DEA"], 15, 0)
-
-    score += np.where(
-        (df["RSI"] >= 50) & (df["RSI"] <= 70),
-        15,
-        np.where(df["RSI"] > 70, 5, 0),
-    )
-
-    score += np.where(
-        df["volume"] > df["VOL20"],
-        10,
-        3,
-    )
-
-    score += np.where(df["RET20"] > 0, 10, 0)
-    score += np.where(df["RET60"] > 0, 5, 0)
-
-    df["SCORE"] = score
-
-    risk = (
-        np.clip((df["ATR_PCT"].fillna(0) - 1) * 14, 0, 55)
-        + np.clip((df["RSI"].fillna(50) - 68) * 2, 0, 25)
-    )
-
-    df["RISK"] = np.clip(risk, 0, 100)
+    df["ATR_PCT"] = df["ATR"] / df["close"]
 
     return df
 
 
-def market_state(score, risk):
+def control_model(df):
+    x = df.iloc[-1]
 
-    if risk >= 70:
-        return "🔴 风险释放"
+    score = 50
+
+    if x["close"] > x["MA20"]:
+        score += 10
+    else:
+        score -= 10
+
+    if x["MA20"] > x["MA60"]:
+        score += 12
+    else:
+        score -= 12
+
+    if x["DIF"] > x["DEA"]:
+        score += 10
+    else:
+        score -= 10
+
+    if x["RET20"] > 0:
+        score += 8
+    else:
+        score -= 8
+
+    if x["RET60"] > 0:
+        score += 8
+    else:
+        score -= 8
+
+    if x["volume"] > x["VOL20"]:
+        score += 5
+
+    if 45 <= x["RSI"] <= 70:
+        score += 5
+
+    score = int(np.clip(score, 0, 100))
+
+    atr_pct = float(x["ATR_PCT"]) if pd.notna(x["ATR_PCT"]) else 0.03
+
+    risk = "低"
+    if atr_pct > 0.06:
+        risk = "高"
+    elif atr_pct > 0.04:
+        risk = "中"
 
     if score >= 75:
-        return "🟢 趋势强化"
+        state = "趋势强化"
+    elif score >= 62:
+        state = "趋势形成"
+    elif score >= 45:
+        state = "震荡观察"
+    elif score >= 30:
+        state = "趋势减弱"
+    else:
+        state = "风险释放"
 
-    if score >= 62:
-        return "🟢 趋势形成"
-
-    if score >= 45:
-        return "🟡 震荡观察"
-
-    return "🔴 趋势减弱"
+    return score, risk, state
 
 
-def forecast(row):
+def forecast(close, score, atr_pct, days):
+    strength = (score - 50) / 50
 
-    atr = row["ATR_PCT"]
+    scale = np.sqrt(days / 5)
 
-    if pd.isna(atr):
-        atr = 2
+    expected = strength * atr_pct * scale * 0.8
 
-    volatility = max(float(atr) / 100, 0.012)
+    center = close * (1 + expected)
 
-    momentum = row["RET20"]
+    width = max(atr_pct * scale * 1.3, 0.025)
 
-    if pd.isna(momentum):
-        momentum = 0
+    low = center * (1 - width)
+    high = center * (1 + width)
 
-    bias = (
-        0.7 * (row["SCORE"] - 50) / 50
-        + 0.3 * np.clip(momentum * 3, -1, 1)
+    probability = int(
+        np.clip(
+            50 + abs(score - 50) * 0.8,
+            50,
+            82
+        )
     )
 
-    bias = np.clip(bias, -1, 1)
+    if score >= 60:
+        direction = "偏强"
+    elif score <= 40:
+        direction = "偏弱"
+    else:
+        direction = "震荡"
 
-    bias *= (1 - 0.4 * row["RISK"] / 100)
-
-    result = []
-
-    for days in [5, 20, 60]:
-
-        root = np.sqrt(days)
-
-        drift = bias * volatility * root * 0.52
-        band = volatility * root * 1.12
-
-        probability = np.clip(
-            50 + bias * 28,
-            20,
-            80
-        )
-
-        if bias > 0.14:
-            direction = "偏强"
-
-        elif bias < -0.14:
-            direction = "偏弱"
-
-        else:
-            direction = "震荡"
-
-        low = row["close"] * (1 + drift - band)
-        high = row["close"] * (1 + drift + band)
-
-        result.append(
-            (days, direction, probability, low, high)
-        )
-
-    return result
+    return direction, probability, low, high
 
 
-if st.button(
-    "开始分析",
-    type="primary",
-    use_container_width=True
-):
+if st.button("开始分析", type="primary", use_container_width=True):
 
-    try:
+    if not code.isdigit() or len(code) != 6:
+        st.error("请输入正确的6位A股股票代码")
 
-        if not token:
-            raise ValueError("请先输入 Tushare Token")
+    else:
+        try:
+            with st.spinner("正在获取A股数据并运行模型..."):
+                df = get_data(code)
+                df = calculate(df)
 
-        if len(code) != 6 or not code.isdigit():
-            raise ValueError("请输入正确的6位股票代码")
+                if len(df) < 70:
+                    raise ValueError("历史数据不足，暂时无法完成模型分析")
 
-        with st.spinner("正在读取A股真实数据并分析…"):
+                score, risk, state = control_model(df)
 
-            pro = ts.pro_api(token)
+                x = df.iloc[-1]
 
-            end = datetime.now().strftime("%Y%m%d")
-
-            start = (
-                datetime.now()
-                - timedelta(days=750)
-            ).strftime("%Y%m%d")
-
-            data = pro.daily(
-                ts_code=ts_code(code),
-                start_date=start,
-                end_date=end
-            )
-
-            if data.empty:
-                raise ValueError("没有取得该股票行情")
-
-            data = data.rename(
-                columns={
-                    "trade_date": "date",
-                    "vol": "volume"
-                }
-            )
-
-            data["date"] = pd.to_datetime(data["date"])
-
-            data = (
-                data
-                .sort_values("date")
-                .reset_index(drop=True)
-            )
-
-            data = calculate(
-                data[
-                    [
-                        "date",
-                        "open",
-                        "high",
-                        "low",
-                        "close",
-                        "volume"
-                    ]
-                ].copy()
-            )
-
-            if len(data) < 80:
-                raise ValueError("历史数据不足")
-
-            row = data.iloc[-1]
-
-            info = pro.stock_basic(
-                ts_code=ts_code(code),
-                fields="ts_code,name,industry"
-            )
-
-            if len(info):
-
-                name = info.iloc[0]["name"]
-                industry = info.iloc[0]["industry"]
-
-            else:
-
-                name = code
-                industry = "—"
-
-
-        st.subheader(
-            f"{name} · {code}"
-        )
-
-        st.caption(
-            f"{industry} ｜ "
-            f"数据日期 {row['date'].date()} ｜ "
-            f"收盘 ¥{row['close']:.2f}"
-        )
-
-
-        state = market_state(
-            row["SCORE"],
-            row["RISK"]
-        )
-
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "当前状态",
-            state
-        )
-
-        c2.metric(
-            "控制分",
-            f"{row['SCORE']:.0f}"
-        )
-
-        c3.metric(
-            "风险",
-            f"{row['RISK']:.0f}"
-        )
-
-
-        st.progress(
-            int(
-                np.clip(
-                    row["SCORE"],
-                    0,
-                    100
+                close = float(x["close"])
+                atr_pct = (
+                    float(x["ATR_PCT"])
+                    if pd.notna(x["ATR_PCT"])
+                    else 0.03
                 )
+
+            st.success("分析完成")
+
+            st.subheader(f"股票代码：{code}")
+
+            st.caption(
+                f"数据日期：{x['date'].strftime('%Y-%m-%d')} ｜ "
+                f"最新收盘：{close:.2f} 元"
             )
-        )
 
+            c1, c2, c3 = st.columns(3)
 
-        st.markdown("### 🔮 未来情景")
+            c1.metric("当前状态", state)
+            c2.metric("控制评分", f"{score}/100")
+            c3.metric("风险等级", risk)
 
+            st.divider()
 
-        for (
-            days,
-            direction,
-            probability,
-            low,
-            high
-        ) in forecast(row):
+            st.subheader("🔮 未来情景分析")
 
-            st.markdown(
-                f"""
-**{days}交易日：{direction}**
+            for days in [5, 20, 60]:
+                direction, probability, low, high = forecast(
+                    close,
+                    score,
+                    atr_pct,
+                    days
+                )
 
-偏强概率：**{probability:.0f}%**
+                st.markdown(
+                    f"""
+**{days}个交易日**
 
-参考区间：
-**¥{low:.2f} ～ ¥{high:.2f}**
+方向：**{direction}**
+
+参考概率：**{probability}%**
+
+情景区间：**{low:.2f} ～ {high:.2f} 元**
 """
+                )
+
+            st.divider()
+
+            support20 = float(df["low"].tail(20).min())
+            resistance20 = float(df["high"].tail(20).max())
+
+            st.subheader("🎯 关键位置")
+
+            a, b = st.columns(2)
+
+            a.metric("20日参考支撑", f"{support20:.2f}")
+            b.metric("20日参考压力", f"{resistance20:.2f}")
+
+            st.subheader("🧠 模型反馈")
+
+            if score >= 75:
+                st.success(
+                    "趋势结构较强，均线、动量和MACD形成较明显的正反馈。"
+                )
+            elif score >= 62:
+                st.info(
+                    "趋势正在形成，后续重点观察成交量和20日均线是否继续强化。"
+                )
+            elif score >= 45:
+                st.warning(
+                    "当前主要处于震荡观察阶段，方向性暂时不够明确。"
+                )
+            elif score >= 30:
+                st.warning(
+                    "趋势出现减弱迹象，应重点观察支撑位以及风险反馈。"
+                )
+            else:
+                st.error(
+                    "当前处于风险释放阶段，趋势和动量信号整体偏弱。"
+                )
+
+            with st.expander("查看详细技术指标"):
+                st.write({
+                    "MA5": round(float(x["MA5"]), 2),
+                    "MA10": round(float(x["MA10"]), 2),
+                    "MA20": round(float(x["MA20"]), 2),
+                    "MA60": round(float(x["MA60"]), 2),
+                    "RSI14": round(float(x["RSI"]), 2),
+                    "DIF": round(float(x["DIF"]), 3),
+                    "DEA": round(float(x["DEA"]), 3),
+                    "MACD": round(float(x["MACD"]), 3),
+                    "20日涨跌幅": f"{float(x['RET20']) * 100:.2f}%",
+                    "60日涨跌幅": f"{float(x['RET60']) * 100:.2f}%",
+                    "ATR波动率": f"{atr_pct * 100:.2f}%"
+                })
+
+            st.subheader("📉 近期价格走势")
+
+            chart = (
+                df[["date", "close"]]
+                .tail(120)
+                .set_index("date")
             )
 
+            st.line_chart(chart)
 
-        support = float(
-            data.tail(20)["low"].min()
-        )
-
-        if (
-            pd.notna(row["MA20"])
-            and row["MA20"] < row["close"]
-        ):
-
-            support = max(
-                support,
-                float(row["MA20"])
+            st.caption(
+                "说明：预测为基于历史价格、趋势、动量和波动率的情景模型，"
+                "不是确定性目标价，也不构成投资建议。"
             )
 
-
-        resistance = float(
-            data.tail(20)["high"].max()
-        )
-
-
-        st.markdown("### 🎯 关键位置")
-
-
-        c1, c2 = st.columns(2)
-
-        c1.metric(
-            "参考支撑",
-            f"¥{support:.2f}"
-        )
-
-        c2.metric(
-            "参考压力",
-            f"¥{resistance:.2f}"
-        )
-
-
-        st.markdown("### 📈 趋势")
-
-
-        chart = (
-            data[
-                [
-                    "date",
-                    "close",
-                    "MA20",
-                    "MA60"
-                ]
-            ]
-            .set_index("date")
-        )
-
-        st.line_chart(chart)
-
-
-        with st.expander("查看详细指标"):
-
-            st.write(
-                "MA5：",
-                round(row["MA5"], 2)
-            )
-
-            st.write(
-                "MA20：",
-                round(row["MA20"], 2)
-            )
-
-            st.write(
-                "MA60：",
-                round(row["MA60"], 2)
-            )
-
-            st.write(
-                "RSI：",
-                round(row["RSI"], 2)
-            )
-
-            st.write(
-                "ATR%：",
-                round(row["ATR_PCT"], 2)
-            )
-
-            st.write(
-                "20日涨跌幅：",
-                f"{row['RET20'] * 100:.2f}%"
-            )
-
-            st.write(
-                "60日涨跌幅：",
-                f"{row['RET60'] * 100:.2f}%"
-            )
-
-
-        st.info(
-            "预测结果属于概率情景推演，"
-            "不是确定性目标价。"
-            "当前版本使用A股日线数据，"
-            "不是Level-2实时盘口。"
-        )
-
-
-    except Exception as e:
-
-        st.error(
-            "分析失败：" + str(e)
-        )
+        except Exception as e:
+            st.error(f"数据获取或分析失败：{e}")
