@@ -5,1116 +5,888 @@ import akshare as ak
 import time
 from datetime import datetime, timedelta
 
-# =========================================================
-# A股工程控制论 V2.2
-# 市场温度 → 大盘 → 行业 → 个股 → 风险 → 概率预测
-# =========================================================
-
 st.set_page_config(
-    page_title="A股工程控制论 V2.2",
-    page_icon="🌡️",
+    page_title="A股工程控制论 V2.3",
+    page_icon="📈",
     layout="centered"
 )
 
 st.title("📈 A股工程控制论")
-st.caption("V2.2 · 市场温度计 · 三层控制 · 今日机会 · 概率预测")
-
-
-# =========================================================
-# 股票池
-# =========================================================
-
-POOL = {
-    "000977": ("浪潮信息", "AI算力"),
-    "002475": ("立讯精密", "消费电子"),
-    "002463": ("沪电股份", "PCB"),
-    "002916": ("深南电路", "PCB"),
-    "300308": ("中际旭创", "光模块"),
-    "300502": ("新易盛", "光模块"),
-    "600183": ("生益科技", "PCB"),
-    "600584": ("长电科技", "半导体"),
-    "600570": ("恒生电子", "金融科技"),
-    "601138": ("工业富联", "AI算力"),
-    "601360": ("三六零", "网络安全"),
-    "603019": ("中科曙光", "AI算力"),
-    "603986": ("兆易创新", "半导体"),
-    "688008": ("澜起科技", "半导体"),
-    "688041": ("海光信息", "AI算力"),
-}
-
-if "records" not in st.session_state:
-    st.session_state.records = []
-
+st.caption("V2.3 · 一周验证版")
 
 # =========================================================
-# 通用函数
+# 工具
 # =========================================================
 
 def clamp(x, a, b):
     return max(a, min(b, x))
 
-
-def clean(df):
-
-    df = df.rename(columns={
-        "日期": "date",
-        "开盘": "open",
-        "收盘": "close",
-        "最高": "high",
-        "最低": "low",
-        "成交量": "volume"
-    })
-
-    need = ["date", "open", "high", "low", "close", "volume"]
-
-    if not all(x in df.columns for x in need):
-        raise ValueError("行情字段不完整")
-
-    df = df[need].copy()
-
-    df["date"] = pd.to_datetime(
-        df["date"],
-        errors="coerce"
-    )
-
-    for x in need[1:]:
-        df[x] = pd.to_numeric(
-            df[x],
-            errors="coerce"
+def num(x):
+    try:
+        return float(
+            str(x).replace(",", "").replace("%", "")
         )
+    except:
+        return np.nan
 
-    df = (
-        df.dropna()
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
+def exchange_code(code):
+    if code.startswith(("5", "6", "9")):
+        return "SH" + code
+    return "SZ" + code
 
-    if len(df) < 70:
-        raise ValueError("历史数据不足")
-
-    return df
-
+def fmt_money(v):
+    try:
+        v = float(v)
+        if abs(v) >= 1e8:
+            return f"{v/1e8:.2f}亿"
+        if abs(v) >= 1e4:
+            return f"{v/1e4:.2f}万"
+        return f"{v:.2f}"
+    except:
+        return "--"
 
 # =========================================================
-# 个股行情：双数据源
+# 股票行情
 # =========================================================
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_em(code):
-
+def get_stock(code):
     end = datetime.now().strftime("%Y%m%d")
-
     start = (
-        datetime.now() - timedelta(days=700)
+        datetime.now() - timedelta(days=800)
     ).strftime("%Y%m%d")
 
-    df = ak.stock_zh_a_hist(
-        symbol=code,
-        period="daily",
-        start_date=start,
-        end_date=end,
-        adjust="qfq"
-    )
+    try:
+        d = ak.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=start,
+            end_date=end,
+            adjust="qfq"
+        )
 
-    return clean(df)
+        d = d.rename(columns={
+            "日期":"date",
+            "开盘":"open",
+            "最高":"high",
+            "最低":"low",
+            "收盘":"close",
+            "成交量":"volume"
+        })
 
+        cols = [
+            "date","open","high",
+            "low","close","volume"
+        ]
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_sina(code):
+        d = d[cols].copy()
+        d["date"] = pd.to_datetime(d["date"])
 
-    prefix = (
-        "sh"
-        if code.startswith(("5", "6", "9"))
-        else "sz"
-    )
+        for c in cols[1:]:
+            d[c] = pd.to_numeric(
+                d[c], errors="coerce"
+            )
 
-    df = ak.stock_zh_a_daily(
-        symbol=prefix + code,
-        adjust="qfq"
-    )
+        d = d.dropna().sort_values("date")
 
-    return clean(df)
+        if len(d) < 70:
+            raise ValueError("历史数据不足")
 
+        return d.reset_index(drop=True)
 
-def load_stock(code):
+    except:
+        prefix = (
+            "sh"
+            if code.startswith(("5","6","9"))
+            else "sz"
+        )
 
-    for _ in range(2):
-        try:
-            return load_em(code), "东方财富"
-        except Exception:
-            time.sleep(0.3)
+        d = ak.stock_zh_a_daily(
+            symbol=prefix + code,
+            adjust="qfq"
+        )
 
-    for _ in range(2):
-        try:
-            return load_sina(code), "新浪财经"
-        except Exception:
-            time.sleep(0.3)
+        d = d.reset_index()
 
-    raise RuntimeError("公开行情源暂时不可用")
+        d = d.rename(columns={
+            "date":"date",
+            "open":"open",
+            "high":"high",
+            "low":"low",
+            "close":"close",
+            "volume":"volume"
+        })
 
+        d["date"] = pd.to_datetime(d["date"])
+
+        return d[
+            ["date","open","high",
+             "low","close","volume"]
+        ].dropna()
 
 # =========================================================
 # 技术指标
 # =========================================================
 
-def indicators(df):
+def technical(d):
+    d = d.copy()
 
-    d = df.copy()
-
-    for n in [5, 10, 20, 60]:
+    for n in [5,10,20,60]:
         d[f"MA{n}"] = (
-            d["close"]
-            .rolling(n)
-            .mean()
+            d.close.rolling(n).mean()
         )
 
-    e12 = (
-        d["close"]
-        .ewm(span=12, adjust=False)
-        .mean()
-    )
+    ema12 = d.close.ewm(
+        span=12, adjust=False
+    ).mean()
 
-    e26 = (
-        d["close"]
-        .ewm(span=26, adjust=False)
-        .mean()
-    )
+    ema26 = d.close.ewm(
+        span=26, adjust=False
+    ).mean()
 
-    d["DIF"] = e12 - e26
+    d["DIF"] = ema12 - ema26
+    d["DEA"] = d.DIF.ewm(
+        span=9, adjust=False
+    ).mean()
 
-    d["DEA"] = (
-        d["DIF"]
-        .ewm(span=9, adjust=False)
-        .mean()
-    )
-
-    d["MACD"] = (
-        2 * (d["DIF"] - d["DEA"])
-    )
-
-    change = d["close"].diff()
-
-    gain = (
-        change.clip(lower=0)
-        .rolling(14)
-        .mean()
-    )
-
-    loss = (
-        -change.clip(upper=0)
-        .rolling(14)
-        .mean()
-    )
+    change = d.close.diff()
+    gain = change.clip(lower=0).rolling(14).mean()
+    loss = (-change.clip(upper=0)).rolling(14).mean()
 
     rs = gain / loss.replace(0, np.nan)
+    d["RSI"] = 100 - 100/(1+rs)
 
-    d["RSI"] = (
-        100 - 100 / (1 + rs)
-    )
+    d["RET20"] = d.close.pct_change(20)
+    d["RET60"] = d.close.pct_change(60)
+    d["VOL20"] = d.volume.rolling(20).mean()
 
-    d["VOL20"] = (
-        d["volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    d["RET5"] = d["close"].pct_change(5)
-    d["RET20"] = d["close"].pct_change(20)
-    d["RET60"] = d["close"].pct_change(60)
-
-    pc = d["close"].shift(1)
+    pc = d.close.shift()
 
     tr = pd.concat([
-        d["high"] - d["low"],
-        (d["high"] - pc).abs(),
-        (d["low"] - pc).abs()
+        d.high-d.low,
+        (d.high-pc).abs(),
+        (d.low-pc).abs()
     ], axis=1).max(axis=1)
 
-    d["ATR"] = (
-        tr.rolling(14).mean()
-    )
+    d["ATR"] = tr.rolling(14).mean()
+    d["ATR_PCT"] = d.ATR/d.close
 
-    d["ATR_PCT"] = (
-        d["ATR"] / d["close"]
-    )
+    x = d.iloc[-1]
+    s = 50
 
-    return d
+    s += 10 if x.close > x.MA20 else -10
+    s += 12 if x.MA20 > x.MA60 else -12
+    s += 10 if x.DIF > x.DEA else -10
+    s += 8 if x.RET20 > 0 else -8
+    s += 8 if x.RET60 > 0 else -8
 
+    if x.volume > x.VOL20:
+        s += 5
 
-# =========================================================
-# 🌡️ 市场温度计
-# -100℃ ～ +100℃
-# =========================================================
+    if 45 <= x.RSI <= 70:
+        s += 5
+    elif x.RSI > 80:
+        s -= 5
 
-def temperature_label(temp):
+    s = int(clamp(s,0,100))
 
-    if temp <= -80:
-        return "🥶 极度恐慌"
-
-    if temp <= -50:
-        return "❄️ 恐慌"
-
-    if temp <= -20:
-        return "🔵 偏冷"
-
-    if temp < 20:
-        return "⚪ 平衡"
-
-    if temp < 50:
-        return "🟡 回暖"
-
-    if temp < 80:
-        return "🔥 火热"
-
-    return "🌋 过热"
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def market_temperature():
-
-    try:
-
-        spot = ak.stock_zh_a_spot_em()
-
-        if spot is None or spot.empty:
-            raise ValueError("市场快照为空")
-
-        # -------------------------
-        # 涨跌幅
-        # -------------------------
-
-        pct = pd.to_numeric(
-            spot["涨跌幅"],
-            errors="coerce"
-        ).dropna()
-
-        if len(pct) < 100:
-            raise ValueError("市场样本不足")
-
-        up = int((pct > 0).sum())
-        down = int((pct < 0).sum())
-        flat = int((pct == 0).sum())
-
-        total = max(up + down + flat, 1)
-
-        # 广度 -100 ~ +100
-        breadth = (
-            (up - down) / total
-        ) * 100
-
-        # -------------------------
-        # 涨跌停近似
-        # -------------------------
-
-        limit_up = int(
-            (pct >= 9.5).sum()
-        )
-
-        limit_down = int(
-            (pct <= -9.5).sum()
-        )
-
-        extreme = clamp(
-            (limit_up - limit_down) * 2.5,
-            -100,
-            100
-        )
-
-        # -------------------------
-        # 赚钱效应
-        # -------------------------
-
-        median_pct = float(
-            pct.median()
-        )
-
-        mean_pct = float(
-            pct.mean()
-        )
-
-        profit_effect = clamp(
-            median_pct * 22
-            + mean_pct * 8,
-            -100,
-            100
-        )
-
-        # -------------------------
-        # 成交活跃度
-        # -------------------------
-
-        amount = pd.to_numeric(
-            spot["成交额"],
-            errors="coerce"
-        ).fillna(0)
-
-        total_amount = float(
-            amount.sum()
-        )
-
-        # 免费接口没有稳定的全市场历史成交额
-        # 当前以当日成交活跃度做非线性映射
-        trillion = (
-            total_amount / 1_000_000_000_000
-        )
-
-        activity = clamp(
-            (trillion - 1.0) * 70,
-            -60,
-            100
-        )
-
-        # -------------------------
-        # 强势股比例
-        # -------------------------
-
-        strong_ratio = float(
-            (pct >= 5).sum()
-        ) / total
-
-        weak_ratio = float(
-            (pct <= -5).sum()
-        ) / total
-
-        risk_appetite = clamp(
-            (strong_ratio - weak_ratio)
-            * 600,
-            -100,
-            100
-        )
-
-        # -------------------------
-        # 温度合成
-        # -------------------------
-
-        temp = (
-            breadth * 0.30
-            + extreme * 0.20
-            + profit_effect * 0.25
-            + activity * 0.10
-            + risk_appetite * 0.15
-        )
-
-        temp = int(
-            round(
-                clamp(temp, -100, 100)
-            )
-        )
-
-        label = temperature_label(temp)
-
-        return {
-            "temperature": temp,
-            "label": label,
-            "up": up,
-            "down": down,
-            "flat": flat,
-            "limit_up": limit_up,
-            "limit_down": limit_down,
-            "amount": total_amount,
-            "median_pct": median_pct,
-            "mean_pct": mean_pct,
-            "breadth": breadth,
-            "profit_effect": profit_effect,
-            "activity": activity,
-            "risk_appetite": risk_appetite
-        }
-
-    except Exception as e:
-
-        return {
-            "temperature": 0,
-            "label": "⚪ 数据暂缺",
-            "error": str(e)
-        }
-
-
-# =========================================================
-# 温度显示组件
-# =========================================================
-
-def show_temperature():
-
-    data = market_temperature()
-
-    temp = data["temperature"]
-    label = data["label"]
-
-    st.subheader("🌡️ 市场温度计")
-
-    a, b = st.columns(2)
-
-    a.metric(
-        "市场温度",
-        f"{temp:+d}℃"
-    )
-
-    b.metric(
-        "市场情绪",
-        label
-    )
-
-    # -100~100 映射到 0~100 的进度条
-    progress = int(
-        clamp(
-            (temp + 100) / 2,
-            0,
-            100
-        )
-    )
-
-    st.progress(progress)
-
-    st.caption(
-        "左端 -100℃ = 极度恐慌 ｜ "
-        "0℃ = 多空平衡 ｜ "
-        "+100℃ = 极度过热"
-    )
-
-    if "error" in data:
-
-        st.warning(
-            "市场全景数据暂时不可用，"
-            "当前温度不参与综合评分。"
-        )
-
-        return data
-
-    c1, c2 = st.columns(2)
-
-    c1.metric(
-        "上涨家数",
-        data["up"]
-    )
-
-    c2.metric(
-        "下跌家数",
-        data["down"]
-    )
-
-    c3, c4 = st.columns(2)
-
-    c3.metric(
-        "涨停近似",
-        data["limit_up"]
-    )
-
-    c4.metric(
-        "跌停近似",
-        data["limit_down"]
-    )
-
-    amount_yi = (
-        data["amount"] / 100_000_000
-    )
-
-    st.metric(
-        "全A成交额",
-        f"{amount_yi:,.0f} 亿"
-    )
-
-    with st.expander(
-        "查看温度构成"
-    ):
-
-        st.write(
-            f"涨跌广度："
-            f"{data['breadth']:+.1f}"
-        )
-
-        st.write(
-            f"赚钱效应："
-            f"{data['profit_effect']:+.1f}"
-        )
-
-        st.write(
-            f"成交活跃："
-            f"{data['activity']:+.1f}"
-        )
-
-        st.write(
-            f"风险偏好："
-            f"{data['risk_appetite']:+.1f}"
-        )
-
-        st.write(
-            f"个股中位涨跌幅："
-            f"{data['median_pct']:+.2f}%"
-        )
-
-    return data
-
-
-# =========================================================
-# 大盘状态
-# =========================================================
-
-@st.cache_data(ttl=600, show_spinner=False)
-def market_control():
-
-    try:
-
-        d = ak.stock_zh_index_daily_em(
-            symbol="sh000001"
-        )
-
-        d["close"] = pd.to_numeric(
-            d["close"],
-            errors="coerce"
-        )
-
-        d = d.dropna()
-
-        close = d["close"].iloc[-1]
-
-        ma20 = (
-            d["close"]
-            .rolling(20)
-            .mean()
-            .iloc[-1]
-        )
-
-        ma60 = (
-            d["close"]
-            .rolling(60)
-            .mean()
-            .iloc[-1]
-        )
-
-        score = 50
-
-        score += (
-            15
-            if close > ma20
-            else -15
-        )
-
-        score += (
-            15
-            if ma20 > ma60
-            else -15
-        )
-
-        r20 = (
-            close /
-            d["close"].iloc[-21]
-            - 1
-        )
-
-        score += (
-            10
-            if r20 > 0
-            else -10
-        )
-
-        score = int(
-            clamp(score, 0, 100)
-        )
-
-        if score >= 70:
-            state = "偏强"
-
-        elif score >= 45:
-            state = "震荡"
-
-        else:
-            state = "偏弱"
-
-        return score, state
-
-    except Exception:
-
-        return 50, "数据暂缺"
-
-
-# =========================================================
-# 个股控制
-# =========================================================
-
-def stock_control(df):
-
-    x = df.iloc[-1]
-
-    score = 50
-
-    good = []
-    bad = []
-
-    if x["close"] > x["MA20"]:
-        score += 10
-        good.append("价格站上MA20")
-    else:
-        score -= 10
-        bad.append("价格位于MA20下方")
-
-    if x["MA20"] > x["MA60"]:
-        score += 12
-        good.append("中期均线结构偏强")
-    else:
-        score -= 12
-        bad.append("中期均线结构偏弱")
-
-    if x["DIF"] > x["DEA"]:
-        score += 10
-        good.append("MACD偏强")
-    else:
-        score -= 10
-
-    if x["RET20"] > 0:
-        score += 8
-        good.append("20日动量为正")
-    else:
-        score -= 8
-
-    if x["RET60"] > 0:
-        score += 8
-        good.append("60日趋势为正")
-    else:
-        score -= 8
-
-    if (
-        pd.notna(x["VOL20"])
-        and x["volume"] > x["VOL20"]
-    ):
-        score += 5
-        good.append("成交量高于20日均量")
-
-    if pd.notna(x["RSI"]):
-
-        if 45 <= x["RSI"] <= 70:
-            score += 5
-            good.append("RSI处于趋势区")
-
-        elif x["RSI"] > 80:
-            score -= 5
-            bad.append("RSI较高")
-
-    score = int(
-        clamp(score, 0, 100)
-    )
-
-    atr = (
-        float(x["ATR_PCT"])
-        if pd.notna(x["ATR_PCT"])
-        else 0.03
-    )
-
-    if atr > 0.06:
-        risk = "高"
-
-    elif atr > 0.04:
-        risk = "中"
-
-    else:
-        risk = "低"
-
-    if score >= 75:
+    if s >= 75:
         state = "趋势强化"
-
-    elif score >= 62:
+    elif s >= 62:
         state = "趋势形成"
-
-    elif score >= 45:
+    elif s >= 45:
         state = "震荡观察"
-
-    elif score >= 30:
+    elif s >= 30:
         state = "趋势减弱"
-
     else:
         state = "风险释放"
 
-    return (
-        score,
-        risk,
-        state,
-        atr,
-        good,
-        bad
+    atr = (
+        float(x.ATR_PCT)
+        if pd.notna(x.ATR_PCT)
+        else .03
     )
 
+    risk = (
+        "高" if atr > .06
+        else "中" if atr > .04
+        else "低"
+    )
+
+    return d, s, state, risk, atr
 
 # =========================================================
-# 行业层
-# 暂不伪造行业强度
+# 🌡️ 市场温度
 # =========================================================
 
-def industry_control(code):
+def temp_label(t):
+    if t is None:
+        return "数据暂缺"
+    if t <= -80:
+        return "🥶 极度恐慌"
+    if t <= -50:
+        return "❄️ 恐慌"
+    if t <= -20:
+        return "🔵 偏冷"
+    if t < 20:
+        return "⚪ 平衡"
+    if t < 50:
+        return "🟡 回暖"
+    if t < 80:
+        return "🔥 火热"
+    return "🌋 过热"
 
-    industry = POOL.get(
-        code,
-        ("", "未分类")
-    )[1]
+@st.cache_data(ttl=300, show_spinner=False)
+def market_temp():
+    try:
+        d = ak.stock_zh_a_spot_em()
 
-    return industry, None, "待接入"
+        pct = pd.to_numeric(
+            d["涨跌幅"], errors="coerce"
+        ).dropna()
 
+        if len(pct) < 500:
+            raise ValueError("样本不足")
 
-# =========================================================
-# 综合控制评分
-# =========================================================
+        up = int((pct>0).sum())
+        down = int((pct<0).sum())
+        total = len(pct)
 
-def total_score(
-    market_score,
-    stock_score,
-    temperature
-):
-
-    # 温度转换成 0~100 环境分
-    temp_score = (
-        temperature + 100
-    ) / 2
-
-    # 过热风险修正
-    if temperature >= 80:
-        temp_score -= (
-            temperature - 80
-        ) * 1.5
-
-    # 极寒环境不直接视为利好
-    if temperature <= -80:
-        temp_score = min(
-            temp_score,
-            20
+        breadth = (
+            (up-down)/total*100
         )
 
-    score = (
-        stock_score * 0.65
-        + market_score * 0.20
-        + temp_score * 0.15
-    )
+        median = float(pct.median())
+        mean = float(pct.mean())
 
-    return int(
-        clamp(
-            round(score),
-            0,
-            100
-        )
-    )
-
-
-# =========================================================
-# 概率情景 V2
-# =========================================================
-
-def forecast(
-    close,
-    score,
-    atr,
-    r20,
-    r60,
-    days
-):
-
-    strength = (
-        score - 50
-    ) / 50
-
-    scale = np.sqrt(
-        days / 5
-    )
-
-    momentum = (
-        np.clip(
-            r20,
-            -0.25,
-            0.25
-        ) * 0.6
-        +
-        np.clip(
-            r60,
-            -0.40,
-            0.40
-        ) * 0.4
-    )
-
-    expected = (
-        strength
-        * atr
-        * scale
-        * 0.65
-        +
-        momentum
-        * min(days / 60, 1)
-        * 0.35
-    )
-
-    center = (
-        close * (1 + expected)
-    )
-
-    width = max(
-        atr * scale * 1.25,
-        0.025
-    )
-
-    low = center * (1 - width)
-    high = center * (1 + width)
-
-    if score >= 60:
-
-        direction = "偏强"
-
-        probability = int(
-            clamp(
-                50
-                + (score - 50)
-                * 0.75,
-                50,
-                80
-            )
+        strong = (
+            ((pct>=5).sum()-(pct<=-5).sum())
+            / total * 100
         )
 
-    elif score <= 40:
+        limit_up = int((pct>=9.5).sum())
+        limit_down = int((pct<=-9.5).sum())
 
-        direction = "偏弱"
-
-        probability = int(
-            clamp(
-                50
-                + (50 - score)
-                * 0.75,
-                50,
-                80
-            )
+        extreme = clamp(
+            (limit_up-limit_down)*2,
+            -100,100
         )
 
-    else:
+        amount = pd.to_numeric(
+            d["成交额"], errors="coerce"
+        ).fillna(0).sum()
 
-        direction = "震荡"
-        probability = 55
+        # 成交额只作为辅助活跃度
+        trillion = amount/1e12
+        activity = clamp(
+            (trillion-1.0)*45,
+            -50,100
+        )
 
-    return (
-        direction,
-        probability,
-        center,
-        low,
-        high
+        t = (
+            breadth*.30 +
+            clamp(median*25,-100,100)*.25 +
+            clamp(mean*15,-100,100)*.10 +
+            extreme*.20 +
+            clamp(strong*8,-100,100)*.10 +
+            activity*.05
+        )
+
+        t = int(round(clamp(t,-100,100)))
+
+        return {
+            "temp":t,
+            "label":temp_label(t),
+            "up":up,
+            "down":down,
+            "limit_up":limit_up,
+            "limit_down":limit_down,
+            "median":median,
+            "amount":amount,
+            "status":"正常"
+        }
+
+    except Exception as e:
+        return {
+            "temp":None,
+            "label":"数据暂缺",
+            "status":"降级",
+            "error":str(e)
+        }
+
+def show_temp():
+    m = market_temp()
+
+    st.subheader("🌡️ 市场温度计")
+
+    if m["temp"] is None:
+        st.metric("市场温度","--℃")
+        st.warning("市场全景数据暂时不可用")
+        return m
+
+    a,b = st.columns(2)
+    a.metric("市场温度",f"{m['temp']:+d}℃")
+    b.metric("市场情绪",m["label"])
+
+    st.progress(
+        int((m["temp"]+100)/2)
     )
 
+    a,b = st.columns(2)
+    a.metric("上涨",m["up"])
+    b.metric("下跌",m["down"])
+
+    a,b = st.columns(2)
+    a.metric("强涨近似",m["limit_up"])
+    b.metric("强跌近似",m["limit_down"])
+
+    st.caption(
+        f"个股中位涨跌：{m['median']:+.2f}% ｜ "
+        f"全A成交额：{m['amount']/1e8:,.0f}亿"
+    )
+
+    return m
 
 # =========================================================
-# 基本面
+# 基本资料 + PE/PB
 # =========================================================
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def basic_info(code):
+@st.cache_data(ttl=1800, show_spinner=False)
+def stock_snapshot(code):
+    out = {}
 
     try:
-
-        d = ak.stock_individual_info_em(
+        info = ak.stock_individual_info_em(
             symbol=code
         )
 
-        if (
-            "item" not in d.columns
-            or "value" not in d.columns
-        ):
-            return {}
-
-        return dict(
-            zip(
-                d["item"].astype(str),
-                d["value"]
+        if "item" in info and "value" in info:
+            out.update(
+                dict(zip(info.item,info.value))
             )
+    except:
+        pass
+
+    # 雪球估值接口备用
+    try:
+        d = ak.stock_individual_spot_xq(
+            symbol=exchange_code(code)
         )
 
-    except Exception:
+        if not d.empty:
+            # 兼容两种返回格式
+            if "item" in d.columns and "value" in d.columns:
+                out.update(
+                    dict(zip(d["item"],d["value"]))
+                )
+            elif len(d) == 1:
+                out.update(d.iloc[0].to_dict())
+    except:
+        pass
 
-        return {}
+    return out
 
+def pick(data, names):
+    for n in names:
+        if n in data:
+            v = data[n]
+            if pd.notna(v):
+                return v
+    return None
 
 # =========================================================
-# 今日机会
+# 财务控制器
 # =========================================================
 
-def opportunity_page():
+@st.cache_data(ttl=21600, show_spinner=False)
+def financial_data(code):
+    result = {
+        "report":"--",
+        "roe":None,
+        "gross":None,
+        "net_margin":None,
+        "debt":None,
+        "revenue":None,
+        "revenue_yoy":None,
+        "profit":None,
+        "profit_yoy":None
+    }
 
-    temp_data = show_temperature()
+    symbol = exchange_code(code)
 
-    st.divider()
-
-    st.subheader("🎯 今日机会")
-
-    st.caption(
-        "结合市场环境和个股状态寻找研究候选。"
-    )
-
-    ms, market_state = market_control()
-
-    temp = temp_data["temperature"]
-
-    a, b = st.columns(2)
-
-    a.metric(
-        "大盘状态",
-        market_state
-    )
-
-    b.metric(
-        "趋势评分",
-        ms
-    )
-
-    count = st.slider(
-        "扫描数量",
-        5,
-        len(POOL),
-        10
-    )
-
-    if not st.button(
-        "开始扫描",
-        type="primary",
-        use_container_width=True
-    ):
-        return
-
-    rows = []
-
-    items = list(
-        POOL.items()
-    )[:count]
-
-    bar = st.progress(0)
-
-    for i, (
-        code,
-        meta
-    ) in enumerate(items):
-
-        name, industry = meta
-
-        try:
-
-            df, _ = load_stock(code)
-
-            df = indicators(df)
-
-            (
-                ss,
-                risk,
-                state,
-                atr,
-                good,
-                bad
-            ) = stock_control(df)
-
-            total = total_score(
-                ms,
-                ss,
-                temp
-            )
-
-            x = df.iloc[-1]
-
-            rows.append({
-                "代码": code,
-                "名称": name,
-                "行业": industry,
-                "综合分": total,
-                "状态": state,
-                "风险": risk,
-                "收盘":
-                    round(
-                        float(x["close"]),
-                        2
-                    ),
-                "20日%":
-                    round(
-                        float(x["RET20"])
-                        * 100,
-                        2
-                    ),
-                "原因":
-                    " / ".join(
-                        good[:2]
-                    )
-            })
-
-        except Exception:
-            pass
-
-        bar.progress(
-            (i + 1)
-            / len(items)
+    # 财务指标
+    try:
+        f = ak.stock_financial_analysis_indicator(
+            symbol=code
         )
 
-        time.sleep(0.1)
+        if f is not None and not f.empty:
+            f = f.copy()
 
-    bar.empty()
+            # 有些版本日期在 index
+            if not isinstance(f.index, pd.RangeIndex):
+                f = f.reset_index()
 
-    if not rows:
+            row = f.iloc[0]
 
-        st.warning(
-            "本次没有取得有效扫描结果。"
+            result["report"] = str(
+                pick(
+                    row.to_dict(),
+                    ["日期","报告期","index"]
+                ) or "--"
+            )
+
+            result["roe"] = pick(
+                row.to_dict(),
+                [
+                    "加权净资产收益率(%)",
+                    "摊薄净资产收益率(%)",
+                    "净资产收益率(%)"
+                ]
+            )
+
+            result["gross"] = pick(
+                row.to_dict(),
+                ["销售毛利率(%)","毛利率(%)"]
+            )
+
+            result["net_margin"] = pick(
+                row.to_dict(),
+                ["销售净利率(%)","净利率(%)"]
+            )
+
+            result["debt"] = pick(
+                row.to_dict(),
+                ["资产负债率(%)"]
+            )
+    except:
+        pass
+
+    # 利润表
+    try:
+        p = ak.stock_profit_sheet_by_report_em(
+            symbol=symbol
         )
 
-        return
+        if p is not None and not p.empty:
+            row = p.iloc[0].to_dict()
 
-    result = pd.DataFrame(rows)
+            result["report"] = str(
+                pick(
+                    row,
+                    ["REPORT_DATE","报告日期","报告期"]
+                ) or result["report"]
+            )[:10]
 
-    result = result.sort_values(
-        "综合分",
-        ascending=False
+            result["revenue"] = pick(
+                row,
+                [
+                    "TOTAL_OPERATE_INCOME",
+                    "OPERATE_INCOME",
+                    "营业总收入",
+                    "营业收入"
+                ]
+            )
+
+            result["revenue_yoy"] = pick(
+                row,
+                [
+                    "TOTAL_OPERATE_INCOME_YOY",
+                    "OPERATE_INCOME_YOY",
+                    "营业收入同比"
+                ]
+            )
+
+            result["profit"] = pick(
+                row,
+                [
+                    "PARENT_NETPROFIT",
+                    "NETPROFIT",
+                    "归属于母公司股东的净利润",
+                    "净利润"
+                ]
+            )
+
+            result["profit_yoy"] = pick(
+                row,
+                [
+                    "PARENT_NETPROFIT_YOY",
+                    "NETPROFIT_YOY",
+                    "净利润同比"
+                ]
+            )
+    except:
+        pass
+
+    return result
+
+def fundamental_score(f):
+    points = []
+    reasons = []
+
+    roe = num(f["roe"])
+    gross = num(f["gross"])
+    debt = num(f["debt"])
+    rg = num(f["revenue_yoy"])
+    pg = num(f["profit_yoy"])
+
+    if pd.notna(roe):
+        points.append(
+            clamp(50+(roe-10)*2,0,100)
+        )
+        reasons.append(
+            f"ROE {roe:.1f}%"
+        )
+
+    if pd.notna(rg):
+        points.append(
+            clamp(50+rg,0,100)
+        )
+        reasons.append(
+            f"营收同比 {rg:+.1f}%"
+        )
+
+    if pd.notna(pg):
+        points.append(
+            clamp(50+pg*.6,0,100)
+        )
+        reasons.append(
+            f"净利润同比 {pg:+.1f}%"
+        )
+
+    if pd.notna(gross):
+        points.append(
+            clamp(40+gross,0,100)
+        )
+
+    if pd.notna(debt):
+        points.append(
+            clamp(100-debt,0,100)
+        )
+
+    if not points:
+        return None, reasons
+
+    return int(np.mean(points)), reasons
+
+# =========================================================
+# 行业景气度
+# =========================================================
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def industry_state(industry):
+    if not industry or industry == "--":
+        return None
+
+    try:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (
+            datetime.now()-timedelta(days=150)
+        ).strftime("%Y%m%d")
+
+        d = ak.stock_board_industry_hist_em(
+            symbol=industry,
+            start_date=start,
+            end_date=end,
+            period="日k",
+            adjust=""
+        )
+
+        close = pd.to_numeric(
+            d["收盘"], errors="coerce"
+        ).dropna()
+
+        if len(close) < 60:
+            return None
+
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma60 = close.rolling(60).mean().iloc[-1]
+
+        r20 = close.iloc[-1]/close.iloc[-21]-1
+
+        score = 50
+        score += 15 if close.iloc[-1]>ma20 else -15
+        score += 15 if ma20>ma60 else -15
+        score += 15 if r20>0 else -15
+
+        score = int(clamp(score,0,100))
+
+        if score >= 70:
+            label = "🔥 高景气/偏强"
+        elif score >= 55:
+            label = "🟢 景气改善"
+        elif score >= 40:
+            label = "⚪ 中性"
+        else:
+            label = "🔵 景气偏弱"
+
+        return {
+            "score":score,
+            "label":label,
+            "ret20":r20*100
+        }
+
+    except:
+        return None
+
+# =========================================================
+# 资金流
+# =========================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fund_flow(code):
+    try:
+        market = (
+            "sh"
+            if code.startswith(("5","6","9"))
+            else "sz"
+        )
+
+        d = ak.stock_individual_fund_flow(
+            stock=code,
+            market=market
+        )
+
+        if d is None or d.empty:
+            return None
+
+        row = d.iloc[-1].to_dict()
+
+        main = pick(
+            row,
+            [
+                "主力净流入-净额",
+                "主力净流入净额"
+            ]
+        )
+
+        ratio = pick(
+            row,
+            [
+                "主力净流入-净占比",
+                "主力净流入净占比"
+            ]
+        )
+
+        return {
+            "main":main,
+            "ratio":ratio
+        }
+
+    except:
+        return None
+
+# =========================================================
+# 公告：订单/利好/利空
+# =========================================================
+
+POS_WORDS = [
+    "中标","合同","订单","回购",
+    "增持","预增","扭亏","重大项目",
+    "战略合作","获批"
+]
+
+NEG_WORDS = [
+    "减持","亏损","处罚","立案",
+    "风险提示","诉讼","终止",
+    "下修","预亏","退市"
+]
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def notices(code):
+    try:
+        d = ak.stock_individual_notice_report(
+            symbol=code
+        )
+
+        if d is None or d.empty:
+            return []
+
+        rows = []
+
+        for _,r in d.head(30).iterrows():
+            title = str(
+                r.get("公告标题","")
+            )
+
+            date = str(
+                r.get("公告日期","")
+            )[:10]
+
+            pos = any(
+                w in title for w in POS_WORDS
+            )
+
+            neg = any(
+                w in title for w in NEG_WORDS
+            )
+
+            if pos or neg:
+                rows.append({
+                    "date":date,
+                    "title":title,
+                    "type":
+                        "🟢 潜在正反馈"
+                        if pos and not neg
+                        else "🔴 潜在风险"
+                        if neg and not pos
+                        else "🟡 需人工判断"
+                })
+
+        return rows[:8]
+
+    except:
+        return []
+
+# =========================================================
+# 综合评分
+# 缺失模块自动重新分配权重
+# =========================================================
+
+def composite(tech, fund, industry, temp):
+    items = [
+        (tech,.45)
+    ]
+
+    if fund is not None:
+        items.append((fund,.25))
+
+    if industry is not None:
+        items.append((industry,.15))
+
+    if temp is not None:
+        env = (temp+100)/2
+
+        # 高温过热惩罚
+        if temp > 80:
+            env -= (temp-80)*1.5
+
+        items.append(
+            (clamp(env,0,100),.15)
+        )
+
+    total_w = sum(w for _,w in items)
+
+    return int(
+        sum(v*w for v,w in items)
+        / total_w
     )
 
-    st.subheader("📊 扫描结果")
+# =========================================================
+# 预测
+# =========================================================
 
-    st.dataframe(
-        result,
-        hide_index=True,
-        use_container_width=True
+def forecast(close,score,atr,r20,r60,days):
+    strength = (score-50)/50
+
+    momentum = (
+        clamp(r20,-.25,.25)*.6 +
+        clamp(r60,-.40,.40)*.4
     )
 
-    st.subheader("📱 状态卡片")
+    scale = np.sqrt(days/5)
 
-    focus = result.head(5)
+    expected = (
+        strength*atr*scale*.6 +
+        momentum*min(days/60,1)*.35
+    )
 
-    for _, r in focus.iterrows():
+    center = close*(1+expected)
 
-        with st.container(border=True):
+    width = max(
+        atr*scale*1.2,
+        .025
+    )
 
-            st.markdown(
-                f"### {r['名称']} · {r['代码']}"
-            )
+    low = center*(1-width)
+    high = center*(1+width)
 
-            st.write(
-                f"**{r['行业']}** ｜ "
-                f"{r['状态']}"
-            )
+    if score >= 60:
+        direction = "偏强"
+        prob = clamp(
+            50+(score-50)*.7,
+            50,80
+        )
+    elif score <= 40:
+        direction = "偏弱"
+        prob = clamp(
+            50+(50-score)*.7,
+            50,80
+        )
+    else:
+        direction = "震荡"
+        prob = 55
 
-            a, b, c = st.columns(3)
-
-            a.metric(
-                "综合分",
-                r["综合分"]
-            )
-
-            b.metric(
-                "风险",
-                r["风险"]
-            )
-
-            c.metric(
-                "20日",
-                f"{r['20日%']:+.1f}%"
-            )
-
-            st.caption(
-                f"主要反馈：{r['原因']}"
-            )
-
+    return (
+        direction,
+        int(prob),
+        low,
+        center,
+        high
+    )
 
 # =========================================================
 # 个股分析
 # =========================================================
 
-def stock_page():
+def analyse(code):
+    d = get_stock(code)
+    d,tech,state,risk,atr = technical(d)
 
-    st.subheader("🔎 个股分析")
+    snap = stock_snapshot(code)
+    fin = financial_data(code)
+    fscore, freasons = fundamental_score(fin)
+
+    industry = pick(
+        snap,
+        ["行业","所属行业"]
+    ) or "--"
+
+    ind = industry_state(str(industry))
+
+    temp = market_temp()
+    t = temp["temp"]
+
+    iscore = (
+        ind["score"]
+        if ind else None
+    )
+
+    score = composite(
+        tech,
+        fscore,
+        iscore,
+        t
+    )
+
+    return {
+        "df":d,
+        "x":d.iloc[-1],
+        "tech":tech,
+        "state":state,
+        "risk":risk,
+        "atr":atr,
+        "snap":snap,
+        "fin":fin,
+        "fund_score":fscore,
+        "industry":industry,
+        "industry_data":ind,
+        "temperature":temp,
+        "score":score,
+        "flow":fund_flow(code),
+        "notices":notices(code)
+    }
+
+# =========================================================
+# 个股页面
+# =========================================================
+
+def stock_page():
+    st.subheader("🔎 个股控制台")
 
     code = st.text_input(
-        "输入6位股票代码",
-        placeholder="例如：000977",
+        "股票代码",
+        placeholder="例如 000977",
         max_chars=6
     ).strip()
 
@@ -1125,660 +897,319 @@ def stock_page():
     ):
         return
 
-    if (
-        len(code) != 6
-        or not code.isdigit()
-    ):
-
-        st.error(
-            "请输入正确的6位股票代码"
-        )
-
+    if len(code)!=6 or not code.isdigit():
+        st.error("请输入6位股票代码")
         return
 
     try:
+        with st.spinner("正在运行控制系统..."):
+            r = analyse(code)
 
-        with st.spinner(
-            "正在运行控制系统..."
-        ):
+        x = r["x"]
+        snap = r["snap"]
 
-            df, source = load_stock(code)
-
-            df = indicators(df)
-
-            (
-                ss,
-                risk,
-                state,
-                atr,
-                good,
-                bad
-            ) = stock_control(df)
-
-            ms, market_state = (
-                market_control()
-            )
-
-            td = market_temperature()
-
-            temp = td["temperature"]
-
-            total = total_score(
-                ms,
-                ss,
-                temp
-            )
-
-            industry, _, industry_state = (
-                industry_control(code)
-            )
-
-            x = df.iloc[-1]
-
-            close = float(
-                x["close"]
-            )
-
-            info = basic_info(code)
-
-        name = info.get(
-            "股票简称",
-            POOL.get(
-                code,
-                (code, "")
-            )[0]
+        name = (
+            pick(snap,["股票简称","名称"])
+            or code
         )
 
-        st.success(
-            f"分析完成 · {source}"
+        st.header(f"{name} · {code}")
+        st.caption(
+            f"数据日期：{x['date'].strftime('%Y-%m-%d')}"
         )
 
-        st.subheader(
-            f"{name} · {code}"
+        a,b,c = st.columns(3)
+        a.metric("综合控制分",r["score"])
+        b.metric("技术状态",r["state"])
+        c.metric("风险",r["risk"])
+
+        # 温度
+        st.subheader("🌡️ 市场环境")
+        t = r["temperature"]
+
+        a,b = st.columns(2)
+
+        if t["temp"] is None:
+            a.metric("市场温度","--℃")
+            b.metric("市场情绪","数据暂缺")
+        else:
+            a.metric(
+                "市场温度",
+                f"{t['temp']:+d}℃"
+            )
+            b.metric(
+                "市场情绪",
+                t["label"]
+            )
+
+        # 行业
+        st.subheader("🏭 行业景气度")
+
+        st.write(
+            f"**所属行业：{r['industry']}**"
         )
+
+        if r["industry_data"]:
+            ind = r["industry_data"]
+
+            a,b = st.columns(2)
+            a.metric(
+                "行业景气分",
+                ind["score"]
+            )
+            b.metric(
+                "行业状态",
+                ind["label"]
+            )
+
+            st.caption(
+                f"行业20日走势："
+                f"{ind['ret20']:+.2f}%"
+            )
+        else:
+            st.info(
+                "当前行业行情接口未取得有效数据"
+            )
+
+        # 基本面
+        st.subheader("🏢 基本面控制器")
+
+        f = r["fin"]
+
+        if r["fund_score"] is not None:
+            st.metric(
+                "基本面评分",
+                r["fund_score"]
+            )
+        else:
+            st.metric(
+                "基本面评分",
+                "--"
+            )
 
         st.caption(
-            f"{x['date'].strftime('%Y-%m-%d')} ｜ "
-            f"收盘 {close:.2f} 元"
+            f"财务报告期：{f['report']}"
         )
 
-        # 核心
-        a, b, c = st.columns(3)
-
+        a,b = st.columns(2)
         a.metric(
-            "综合评分",
-            total
+            "ROE",
+            "--" if f["roe"] is None
+            else f"{num(f['roe']):.2f}%"
         )
-
         b.metric(
-            "状态",
-            state
+            "毛利率",
+            "--" if f["gross"] is None
+            else f"{num(f['gross']):.2f}%"
         )
 
-        c.metric(
-            "风险",
-            risk
-        )
-
-        # 市场温度
-        st.subheader(
-            "🌡️ 当前市场环境"
-        )
-
-        a, b = st.columns(2)
-
+        a,b = st.columns(2)
         a.metric(
-            "市场温度",
-            f"{temp:+d}℃"
+            "净利率",
+            "--" if f["net_margin"] is None
+            else f"{num(f['net_margin']):.2f}%"
         )
-
         b.metric(
-            "市场情绪",
-            td["label"]
+            "资产负债率",
+            "--" if f["debt"] is None
+            else f"{num(f['debt']):.2f}%"
         )
 
-        # 三层
-        st.subheader(
-            "🧠 控制系统"
+        st.write(
+            "**营业收入：**",
+            fmt_money(f["revenue"])
         )
 
-        a, b, c = st.columns(3)
+        st.write(
+            "**营收同比：**",
+            "--"
+            if f["revenue_yoy"] is None
+            else f"{num(f['revenue_yoy']):+.2f}%"
+        )
 
+        st.write(
+            "**归母净利润：**",
+            fmt_money(f["profit"])
+        )
+
+        st.write(
+            "**净利润同比：**",
+            "--"
+            if f["profit_yoy"] is None
+            else f"{num(f['profit_yoy']):+.2f}%"
+        )
+
+        # 估值
+        st.subheader("💰 估值")
+
+        pe = pick(
+            snap,
+            [
+                "市盈率(TTM)",
+                "市盈率-动态",
+                "市盈率(动)"
+            ]
+        )
+
+        pb = pick(
+            snap,
+            ["市净率"]
+        )
+
+        cap = pick(
+            snap,
+            ["总市值"]
+        )
+
+        a,b = st.columns(2)
         a.metric(
-            "大盘",
-            market_state,
-            f"{ms}分"
+            "PE",
+            "--" if pe is None else pe
         )
-
         b.metric(
-            "行业",
-            industry_state,
-            industry
+            "PB",
+            "--" if pb is None else pb
         )
 
-        c.metric(
-            "个股",
-            state,
-            f"{ss}分"
+        st.write(
+            "**总市值：**",
+            fmt_money(cap)
         )
+
+        # 资金
+        st.subheader("💵 资金/量价")
+
+        flow = r["flow"]
+
+        if flow:
+            a,b = st.columns(2)
+            a.metric(
+                "主力净流入",
+                fmt_money(flow["main"])
+            )
+            b.metric(
+                "主力净占比",
+                "--"
+                if flow["ratio"] is None
+                else str(flow["ratio"])
+            )
+        else:
+            st.info(
+                "本次未取得可靠资金流数据"
+            )
+
+        # 订单/利好利空
+        st.subheader("📦 订单 · 催化 · 风险")
+
+        ns = r["notices"]
+
+        if not ns:
+            st.info(
+                "近期公告中未识别到可靠的"
+                "订单/重大催化/风险关键词。"
+                "这不代表公司没有相关事项。"
+            )
+        else:
+            for n in ns:
+                with st.container(border=True):
+                    st.write(
+                        f"**{n['type']}**"
+                    )
+                    st.write(n["title"])
+                    st.caption(
+                        f"{n['date']} ｜ "
+                        "来源：公开公司公告"
+                    )
 
         st.caption(
-            "行业真实强弱数据尚未接入，"
-            "因此当前行业层不参与综合评分。"
+            "⚠️ 当前公告分类属于关键词初筛，"
+            "不会仅凭标题自动认定为真实利好或利空。"
+        )
+
+        # 技术
+        st.subheader("📊 技术控制器")
+
+        a,b = st.columns(2)
+        a.metric("技术评分",r["tech"])
+        b.metric("当前状态",r["state"])
+
+        st.line_chart(
+            r["df"][
+                ["date","close","MA20","MA60"]
+            ].tail(120).set_index("date")
         )
 
         # 预测
-        st.subheader(
-            "🔮 5 / 20 / 60日情景"
-        )
+        st.subheader("🔮 5 / 20 / 60日概率情景")
 
-        prediction_rows = []
+        rows=[]
 
-        for days in [5, 20, 60]:
-
-            (
-                direction,
-                prob,
-                center,
-                low,
-                high
-            ) = forecast(
-                close,
-                total,
-                atr,
-                float(x["RET20"]),
-                float(x["RET60"]),
+        for days in [5,20,60]:
+            direction,prob,low,center,high = forecast(
+                float(x.close),
+                r["score"],
+                r["atr"],
+                float(x.RET20),
+                float(x.RET60),
                 days
             )
 
-            prediction_rows.append({
-                "周期": f"{days}日",
-                "方向": direction,
-                "概率": f"{prob}%",
-                "中枢":
-                    round(center, 2),
-                "区间":
+            rows.append({
+                "周期":f"{days}日",
+                "方向":direction,
+                "概率":f"{prob}%",
+                "中枢":round(center,2),
+                "参考区间":
                     f"{low:.2f}～{high:.2f}"
             })
 
         st.dataframe(
-            pd.DataFrame(
-                prediction_rows
-            ),
+            pd.DataFrame(rows),
             hide_index=True,
             use_container_width=True
         )
 
-        st.caption(
-            "这是概率情景，不是确定性目标价。"
-        )
+        support = r["df"].low.tail(20).min()
+        resistance = r["df"].high.tail(20).max()
 
-        # 支撑压力
-        support = float(
-            df["low"]
-            .tail(20)
-            .min()
-        )
-
-        resistance = float(
-            df["high"]
-            .tail(20)
-            .max()
-        )
-
-        st.subheader(
-            "🎯 关键位置"
-        )
-
-        a, b = st.columns(2)
-
+        a,b = st.columns(2)
         a.metric(
             "20日支撑",
             f"{support:.2f}"
         )
-
         b.metric(
             "20日压力",
             f"{resistance:.2f}"
         )
 
-        # 基本面
-        st.subheader(
-            "🏢 基本面"
-        )
-
-        if info:
-
-            shown = False
-
-            for key in [
-                "总市值",
-                "流通市值",
-                "行业",
-                "上市时间"
-            ]:
-
-                if key in info:
-
-                    st.write(
-                        f"**{key}：** "
-                        f"{info[key]}"
-                    )
-
-                    shown = True
-
-            if not shown:
-
-                st.info(
-                    "本次基本面接口没有返回可展示字段。"
-                )
-
-        else:
-
-            st.info(
-                "基本面接口暂时不可用。"
-            )
-
         st.caption(
-            "PE/PB/ROE、营收和净利润等数据"
-            "只有可靠取得后才会参与后续版本评分。"
+            "概率与价格区间是模型情景，"
+            "不是确定性目标价。"
         )
-
-        # 反馈
-        st.subheader(
-            "🟢 正反馈"
-        )
-
-        if good:
-
-            for item in good:
-                st.write(
-                    "• " + item
-                )
-
-        else:
-
-            st.write(
-                "暂无明显正反馈"
-            )
-
-        st.subheader(
-            "⚠️ 风险反馈"
-        )
-
-        if bad:
-
-            for item in bad:
-                st.write(
-                    "• " + item
-                )
-
-        else:
-
-            st.write(
-                "暂无明显技术风险项"
-            )
-
-        st.write(
-            f"**状态失效观察：** "
-            f"若有效跌破 {support:.2f} 元，"
-            f"重新评估当前状态。"
-        )
-
-        # 图
-        st.subheader(
-            "📉 近期走势"
-        )
-
-        chart = (
-            df[
-                [
-                    "date",
-                    "close",
-                    "MA20",
-                    "MA60"
-                ]
-            ]
-            .tail(120)
-            .set_index("date")
-        )
-
-        st.line_chart(chart)
-
-        with st.expander(
-            "专业指标"
-        ):
-
-            st.write({
-                "MA5":
-                    round(
-                        float(x["MA5"]),
-                        2
-                    ),
-
-                "MA20":
-                    round(
-                        float(x["MA20"]),
-                        2
-                    ),
-
-                "MA60":
-                    round(
-                        float(x["MA60"]),
-                        2
-                    ),
-
-                "RSI":
-                    round(
-                        float(x["RSI"]),
-                        2
-                    ),
-
-                "MACD":
-                    round(
-                        float(x["MACD"]),
-                        3
-                    ),
-
-                "20日收益":
-                    f"{float(x['RET20']) * 100:.2f}%",
-
-                "60日收益":
-                    f"{float(x['RET60']) * 100:.2f}%",
-
-                "ATR":
-                    f"{atr * 100:.2f}%"
-            })
-
-        # 保存
-        if st.button(
-            "📝 保存本次预测",
-            use_container_width=True
-        ):
-
-            record = {
-                "时间":
-                    datetime.now().strftime(
-                        "%Y-%m-%d %H:%M"
-                    ),
-                "代码": code,
-                "名称": name,
-                "基准价":
-                    round(close, 2),
-                "综合分": total,
-                "市场温度":
-                    temp,
-                "状态": state,
-                "风险": risk
-            }
-
-            for days in [
-                5,
-                20,
-                60
-            ]:
-
-                (
-                    direction,
-                    prob,
-                    center,
-                    low,
-                    high
-                ) = forecast(
-                    close,
-                    total,
-                    atr,
-                    float(x["RET20"]),
-                    float(x["RET60"]),
-                    days
-                )
-
-                record[
-                    f"{days}日方向"
-                ] = direction
-
-                record[
-                    f"{days}日概率"
-                ] = prob
-
-                record[
-                    f"{days}日下限"
-                ] = round(low, 2)
-
-                record[
-                    f"{days}日上限"
-                ] = round(high, 2)
-
-            st.session_state.records.append(
-                record
-            )
-
-            st.success(
-                "预测已保存到验证中心"
-            )
 
     except Exception as e:
-
-        st.error(
-            "数据获取失败，请稍后重试。"
-        )
-
-        with st.expander(
-            "错误详情"
-        ):
+        st.error("本次分析失败")
+        with st.expander("错误详情"):
             st.code(str(e))
 
-
 # =========================================================
-# 自选股
-# =========================================================
-
-def favorites_page():
-
-    st.subheader(
-        "⭐ 自选股"
-    )
-
-    text = st.text_area(
-        "股票代码，用逗号分隔",
-        value="000977,600519,002475"
-    )
-
-    if not st.button(
-        "分析自选股",
-        type="primary",
-        use_container_width=True
-    ):
-        return
-
-    codes = [
-        x.strip()
-        for x in text.replace(
-            "，",
-            ","
-        ).split(",")
-        if (
-            x.strip().isdigit()
-            and len(x.strip()) == 6
-        )
-    ][:15]
-
-    if not codes:
-
-        st.warning(
-            "请输入正确股票代码"
-        )
-
-        return
-
-    ms, _ = market_control()
-
-    td = market_temperature()
-
-    temp = td["temperature"]
-
-    rows = []
-
-    bar = st.progress(0)
-
-    for i, code in enumerate(codes):
-
-        try:
-
-            df, _ = load_stock(code)
-
-            df = indicators(df)
-
-            (
-                ss,
-                risk,
-                state,
-                atr,
-                good,
-                bad
-            ) = stock_control(df)
-
-            total = total_score(
-                ms,
-                ss,
-                temp
-            )
-
-            x = df.iloc[-1]
-
-            name = POOL.get(
-                code,
-                (code, "")
-            )[0]
-
-            rows.append({
-                "代码": code,
-                "名称": name,
-                "综合分": total,
-                "状态": state,
-                "风险": risk,
-                "收盘":
-                    round(
-                        float(x["close"]),
-                        2
-                    ),
-                "20日%":
-                    round(
-                        float(x["RET20"])
-                        * 100,
-                        2
-                    ),
-                "60日%":
-                    round(
-                        float(x["RET60"])
-                        * 100,
-                        2
-                    )
-            })
-
-        except Exception:
-            pass
-
-        bar.progress(
-            (i + 1)
-            / len(codes)
-        )
-
-    bar.empty()
-
-    if rows:
-
-        st.dataframe(
-            pd.DataFrame(rows)
-            .sort_values(
-                "综合分",
-                ascending=False
-            ),
-            hide_index=True,
-            use_container_width=True
-        )
-
-    else:
-
-        st.warning(
-            "没有取得有效行情。"
-        )
-
-
-# =========================================================
-# 预测验证
-# =========================================================
-
-def validation_page():
-
-    st.subheader(
-        "🧪 预测验证中心"
-    )
-
-    st.caption(
-        "保存模型当时的判断，"
-        "以后与真实走势进行比较。"
-    )
-
-    if not st.session_state.records:
-
-        st.info(
-            "暂无预测记录。\n\n"
-            "先进入个股分析，"
-            "完成分析后点击保存预测。"
-        )
-
-        return
-
-    df = pd.DataFrame(
-        st.session_state.records
-    )
-
-    st.dataframe(
-        df,
-        hide_index=True,
-        use_container_width=True
-    )
-
-    st.metric(
-        "预测记录",
-        len(df)
-    )
-
-    st.warning(
-        "目前记录仍为会话级保存。"
-        "Streamlit重启可能清空。"
-        "下一阶段升级为持久化数据库。"
-    )
-
-
-# =========================================================
-# 独立市场温度页面
+# 温度页面
 # =========================================================
 
 def temperature_page():
+    m = show_temp()
 
-    data = show_temperature()
-
-    st.divider()
-
-    st.subheader(
-        "🧭 温度解释"
-    )
+    st.subheader("市场情绪定义")
 
     table = pd.DataFrame([
-        ["-100～-80℃", "🥶 极度恐慌", "活跃度极低"],
-        ["-80～-50℃", "❄️ 恐慌", "空方明显占优"],
-        ["-50～-20℃", "🔵 偏冷", "情绪谨慎"],
-        ["-20～+20℃", "⚪ 平衡", "多空相对均衡"],
-        ["+20～+50℃", "🟡 回暖", "活跃度改善"],
-        ["+50～+80℃", "🔥 火热", "赚钱效应较强"],
-        ["+80～+100℃", "🌋 过热", "情绪亢奋/注意过热"]
-    ], columns=[
-        "温度",
-        "市场情绪",
-        "解释"
-    ])
+        ["-100～-80℃","🥶 极度恐慌"],
+        ["-80～-50℃","❄️ 恐慌"],
+        ["-50～-20℃","🔵 偏冷"],
+        ["-20～+20℃","⚪ 平衡"],
+        ["+20～+50℃","🟡 回暖"],
+        ["+50～+80℃","🔥 火热"],
+        ["+80～+100℃","🌋 过热"],
+    ],columns=["温度","市场情绪"])
 
     st.dataframe(
         table,
@@ -1786,71 +1217,35 @@ def temperature_page():
         use_container_width=True
     )
 
-    st.info(
-        "高温不等于继续上涨，"
+    st.caption(
+        "高温并不等于一定上涨，"
         "低温也不等于立即反弹。"
-        "温度描述的是市场活跃度、"
-        "赚钱效应与风险偏好的综合状态。"
     )
 
-
 # =========================================================
-# 模型
+# 首页
 # =========================================================
 
-def model_page():
+def home():
+    m = show_temp()
 
-    st.subheader(
-        "⚙️ 控制模型"
+    st.divider()
+
+    st.subheader("🧠 当前控制系统")
+
+    st.write(
+        "🌡️ 市场情绪 → 📈 市场趋势 → "
+        "🏭 行业景气 → 📦 订单/催化 → "
+        "🏢 基本面 → 💰 估值 → "
+        "💵 资金 → 📊 技术 → "
+        "⚠️ 风险 → 🔮 概率情景"
     )
 
-    st.markdown("""
-### V2.2 控制链
-
-**市场温度**
-↓  
-**大盘趋势**
-↓  
-**行业状态**
-↓  
-**个股状态**
-↓  
-**量价 / 动量 / 波动**
-↓  
-**风险反馈**
-↓  
-**综合控制评分**
-↓  
-**5 / 20 / 60日概率情景**
-↓  
-**真实结果验证**
-
-### 当前综合评分
-
-- 个股状态：65%
-- 大盘趋势：20%
-- 市场温度：15%
-
-行业真实强度尚未稳定接入，因此目前不伪造行业分数。
-
-### 市场温度输入
-
-- 上涨 / 下跌家数
-- 涨跌广度
-- 涨停 / 跌停近似
-- 市场平均涨跌幅
-- 市场中位涨跌幅
-- 强势股 / 弱势股比例
-- 全A成交活跃度
-
-### 下一阶段
-
-真实行业指数、PE/PB/ROE、
-营收利润增长、资金流、
-温度历史数据库、5/20日温度曲线、
-预测自动验证和模型重新校准。
-""")
-
+    st.info(
+        "V2.3 为一周验证版本。"
+        "数据缺失项不按0分处理，"
+        "而是退出对应评分并重新分配权重。"
+    )
 
 # =========================================================
 # 导航
@@ -1859,39 +1254,53 @@ def model_page():
 page = st.selectbox(
     "功能",
     [
-        "🎯 今日机会",
-        "🌡️ 市场温度计",
+        "🏠 控制中心",
         "🔎 个股分析",
-        "⭐ 自选股",
-        "🧪 预测验证",
-        "⚙️ 模型"
+        "🌡️ 市场温度计",
+        "⚙️ 模型说明"
     ]
 )
 
 st.divider()
 
-if page == "🎯 今日机会":
-    opportunity_page()
-
-elif page == "🌡️ 市场温度计":
-    temperature_page()
+if page == "🏠 控制中心":
+    home()
 
 elif page == "🔎 个股分析":
     stock_page()
 
-elif page == "⭐ 自选股":
-    favorites_page()
-
-elif page == "🧪 预测验证":
-    validation_page()
+elif page == "🌡️ 市场温度计":
+    temperature_page()
 
 else:
-    model_page()
+    st.subheader("⚙️ V2.3 模型")
+    st.markdown("""
+**当前主要控制器**
+
+- 市场温度：-100℃ ～ +100℃
+- 行业景气度
+- 公司基本面
+- PE / PB估值
+- ROE / 毛利率 / 净利率
+- 营收 / 净利润 / 同比变化
+- 资产负债率
+- 主力资金流
+- 技术趋势
+- 订单 / 公告 / 催化 / 风险
+- 5 / 20 / 60日概率情景
+
+**重要原则**
+
+缺失数据不等于0。
+
+公告标题只进行信息初筛，
+不自动把关键词认定为真实利好或利空。
+
+本版本先运行一周，
+再根据真实结果校准各控制器权重。
+""")
 
 st.divider()
-
 st.caption(
-    "A股工程控制论 V2.2 ｜ "
-    "市场温度范围 -100℃～+100℃ ｜ "
-    "模型结果用于研究与情景分析。"
+    "A股工程控制论 V2.3 · 一周验证版"
 )
