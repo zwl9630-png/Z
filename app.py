@@ -4,64 +4,43 @@ import numpy as np
 import akshare as ak
 from datetime import datetime, timedelta
 
-# ============================================================
-# A股工程控制论 V2.3.1 FAST
-# ============================================================
-
 st.set_page_config(
-    page_title="A股工程控制论 V2.3.1 Fast",
+    page_title="A股工程控制论 V2.3.2",
     page_icon="📈",
     layout="centered"
 )
 
 st.title("📈 A股工程控制论")
-st.caption("V2.3.1 FAST · 一周验证版")
+st.caption("V2.3.2 Mobile Fast · 一周验证版")
 
-# ============================================================
+
+# =========================
 # 基础工具
-# ============================================================
+# =========================
 
-def clamp(x, low, high):
-    return max(low, min(high, x))
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
 
 
-def safe_num(x):
+def num(x):
     try:
-        return float(
-            str(x)
-            .replace(",", "")
-            .replace("%", "")
-            .replace("--", "")
-        )
+        return float(str(x).replace(",", "").replace("%", ""))
     except:
         return np.nan
 
 
-def fmt_num(x, digits=2):
+def money(x):
     try:
         x = float(x)
-        if np.isnan(x):
-            return "--"
-        return f"{x:.{digits}f}"
-    except:
-        return "--"
-
-
-def fmt_money(x):
-    try:
-        x = float(x)
-
-        if np.isnan(x):
-            return "--"
 
         if abs(x) >= 1e12:
-            return f"{x/1e12:.2f}万亿"
+            return f"{x / 1e12:.2f}万亿"
 
         if abs(x) >= 1e8:
-            return f"{x/1e8:.2f}亿"
+            return f"{x / 1e8:.2f}亿"
 
         if abs(x) >= 1e4:
-            return f"{x/1e4:.2f}万"
+            return f"{x / 1e4:.2f}万"
 
         return f"{x:.2f}"
 
@@ -69,57 +48,40 @@ def fmt_money(x):
         return "--"
 
 
-def get_item(data, names):
-
-    if data is None:
+def pick(data, names):
+    if not isinstance(data, dict):
         return None
 
     for name in names:
+        if name in data:
+            value = data[name]
 
-        try:
-            if isinstance(data, dict):
-                if name in data:
-                    v = data[name]
-
-                    if pd.notna(v):
-                        return v
-        except:
-            pass
+            if pd.notna(value):
+                return value
 
     return None
 
 
-def market_prefix(code):
-
+def prefix(code):
     if code.startswith(("5", "6", "9")):
         return "sh"
 
     return "sz"
 
 
-def exchange_code(code):
-
-    if code.startswith(("5", "6", "9")):
-        return "SH" + code
-
-    return "SZ" + code
-
-
-# ============================================================
-# ① FAST 行情
-# ============================================================
+# =========================
+# 历史行情
+# =========================
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_price_data(code):
+def get_prices(code):
 
     end = datetime.now().strftime("%Y%m%d")
 
     start = (
-        datetime.now() -
-        timedelta(days=500)
+        datetime.now() - timedelta(days=500)
     ).strftime("%Y%m%d")
 
-    # 主接口
     try:
 
         df = ak.stock_zh_a_hist(
@@ -130,21 +92,19 @@ def get_price_data(code):
             adjust="qfq"
         )
 
-        if df is not None and len(df) >= 70:
+        df = df.rename(
+            columns={
+                "日期": "date",
+                "开盘": "open",
+                "最高": "high",
+                "最低": "low",
+                "收盘": "close",
+                "成交量": "volume"
+            }
+        )
 
-            df = df.rename(
-                columns={
-                    "日期": "date",
-                    "开盘": "open",
-                    "最高": "high",
-                    "最低": "low",
-                    "收盘": "close",
-                    "成交量": "volume",
-                    "成交额": "amount"
-                }
-            )
-
-            needed = [
+        df = df[
+            [
                 "date",
                 "open",
                 "high",
@@ -152,116 +112,98 @@ def get_price_data(code):
                 "close",
                 "volume"
             ]
+        ].copy()
 
-            df = df[needed].copy()
+        df["date"] = pd.to_datetime(df["date"])
 
-            df["date"] = pd.to_datetime(
-                df["date"]
+        for col in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
             )
 
-            for c in needed[1:]:
+        df = (
+            df.dropna()
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
 
-                df[c] = pd.to_numeric(
-                    df[c],
-                    errors="coerce"
-                )
-
-            df = (
-                df.dropna()
-                .sort_values("date")
-                .reset_index(drop=True)
-            )
-
+        if len(df) >= 70:
             return df
 
     except:
         pass
 
-    # 备用接口
-    try:
+    symbol = prefix(code) + code
 
-        symbol = market_prefix(code) + code
+    df = ak.stock_zh_a_daily(
+        symbol=symbol,
+        adjust="qfq"
+    ).reset_index()
 
-        df = ak.stock_zh_a_daily(
-            symbol=symbol,
-            adjust="qfq"
-        )
+    df["date"] = pd.to_datetime(df["date"])
 
-        if df is None or len(df) < 70:
-            raise ValueError("历史行情不足")
+    df = df[
+        [
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+    ].dropna()
 
-        df = df.reset_index()
+    df = df.tail(500).reset_index(drop=True)
 
-        df["date"] = pd.to_datetime(
-            df["date"]
-        )
+    if len(df) < 70:
+        raise ValueError("历史行情不足")
 
-        return (
-            df[
-                [
-                    "date",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume"
-                ]
-            ]
-            .dropna()
-            .tail(500)
-            .reset_index(drop=True)
-        )
-
-    except Exception as e:
-
-        raise RuntimeError(
-            f"行情接口暂时不可用：{e}"
-        )
+    return df
 
 
-# ============================================================
-# ② 技术控制器
-# ============================================================
+# =========================
+# 技术控制器
+# =========================
 
 def technical_engine(df):
 
-    d = df.copy()
+    df = df.copy()
 
-    for n in [5, 10, 20, 60]:
-
-        d[f"MA{n}"] = (
-            d["close"]
-            .rolling(n)
+    for period in [5, 10, 20, 60]:
+        df[f"MA{period}"] = (
+            df["close"]
+            .rolling(period)
             .mean()
         )
 
-    # MACD
     ema12 = (
-        d["close"]
+        df["close"]
         .ewm(span=12, adjust=False)
         .mean()
     )
 
     ema26 = (
-        d["close"]
+        df["close"]
         .ewm(span=26, adjust=False)
         .mean()
     )
 
-    d["DIF"] = ema12 - ema26
+    df["DIF"] = ema12 - ema26
 
-    d["DEA"] = (
-        d["DIF"]
+    df["DEA"] = (
+        df["DIF"]
         .ewm(span=9, adjust=False)
         .mean()
     )
 
-    d["MACD"] = (
-        (d["DIF"] - d["DEA"]) * 2
-    )
-
-    # RSI
-    delta = d["close"].diff()
+    delta = df["close"].diff()
 
     gain = (
         delta.clip(lower=0)
@@ -277,171 +219,92 @@ def technical_engine(df):
 
     rs = gain / loss.replace(0, np.nan)
 
-    d["RSI"] = (
-        100 - 100 / (1 + rs)
-    )
+    df["RSI"] = 100 - 100 / (1 + rs)
 
-    # 收益率
-    d["RET5"] = (
-        d["close"]
-        .pct_change(5)
-    )
+    df["RET20"] = df["close"].pct_change(20)
+    df["RET60"] = df["close"].pct_change(60)
 
-    d["RET20"] = (
-        d["close"]
-        .pct_change(20)
-    )
-
-    d["RET60"] = (
-        d["close"]
-        .pct_change(60)
-    )
-
-    # 成交量
-    d["VOL20"] = (
-        d["volume"]
+    df["VOL20"] = (
+        df["volume"]
         .rolling(20)
         .mean()
     )
 
-    # ATR
-    previous_close = (
-        d["close"].shift(1)
-    )
+    previous_close = df["close"].shift()
 
     tr = pd.concat(
         [
-            d["high"] - d["low"],
-
-            (
-                d["high"] -
-                previous_close
-            ).abs(),
-
-            (
-                d["low"] -
-                previous_close
-            ).abs()
+            df["high"] - df["low"],
+            (df["high"] - previous_close).abs(),
+            (df["low"] - previous_close).abs()
         ],
         axis=1
     ).max(axis=1)
 
-    d["ATR"] = (
-        tr.rolling(14).mean()
-    )
+    df["ATR"] = tr.rolling(14).mean()
+    df["ATR_PCT"] = df["ATR"] / df["close"]
 
-    d["ATR_PCT"] = (
-        d["ATR"] /
-        d["close"]
-    )
-
-    x = d.iloc[-1]
+    row = df.iloc[-1]
 
     score = 50
 
-    # 价格趋势
-    score += (
-        10
-        if x["close"] > x["MA20"]
-        else -10
-    )
+    score += 10 if row["close"] > row["MA20"] else -10
+    score += 12 if row["MA20"] > row["MA60"] else -12
+    score += 10 if row["DIF"] > row["DEA"] else -10
+    score += 8 if row["RET20"] > 0 else -8
+    score += 8 if row["RET60"] > 0 else -8
 
-    score += (
-        12
-        if x["MA20"] > x["MA60"]
-        else -12
-    )
-
-    # MACD
-    score += (
-        10
-        if x["DIF"] > x["DEA"]
-        else -10
-    )
-
-    # 动量
-    score += (
-        8
-        if x["RET20"] > 0
-        else -8
-    )
-
-    score += (
-        8
-        if x["RET60"] > 0
-        else -8
-    )
-
-    # 成交量
     if (
-        pd.notna(x["VOL20"])
-        and x["volume"] > x["VOL20"]
+        pd.notna(row["VOL20"])
+        and row["volume"] > row["VOL20"]
     ):
         score += 5
 
-    # RSI
-    if pd.notna(x["RSI"]):
+    if pd.notna(row["RSI"]):
 
-        if 45 <= x["RSI"] <= 70:
+        if 45 <= row["RSI"] <= 70:
             score += 5
 
-        elif x["RSI"] >= 80:
-            score -= 6
+        elif row["RSI"] > 80:
+            score -= 5
 
-    score = int(
-        clamp(score, 0, 100)
-    )
+    score = int(clamp(score, 0, 100))
 
     if score >= 75:
-
         state = "趋势强化"
 
     elif score >= 62:
-
         state = "趋势形成"
 
     elif score >= 45:
-
         state = "震荡观察"
 
     elif score >= 30:
-
         state = "趋势减弱"
 
     else:
-
         state = "风险释放"
 
-    atr_pct = (
-        float(x["ATR_PCT"])
-        if pd.notna(x["ATR_PCT"])
-        else 0.03
-    )
+    if pd.notna(row["ATR_PCT"]):
+        atr = float(row["ATR_PCT"])
+    else:
+        atr = 0.03
 
-    if atr_pct >= 0.06:
-
+    if atr > 0.06:
         risk = "高"
 
-    elif atr_pct >= 0.04:
-
+    elif atr > 0.04:
         risk = "中"
 
     else:
-
         risk = "低"
 
-    return (
-        d,
-        score,
-        state,
-        risk,
-        atr_pct
-    )
+    return df, score, state, risk, atr
 
 
-# ============================================================
-# ③ FAST预测
-# ============================================================
+# =========================
+# 预测模型
+# =========================
 
 def forecast(
     close,
@@ -452,73 +315,54 @@ def forecast(
     days
 ):
 
-    strength = (
-        score - 50
-    ) / 50
+    strength = (score - 50) / 50
 
     momentum = (
-        clamp(ret20, -0.25, 0.25)
-        * 0.60
+        clamp(ret20, -0.25, 0.25) * 0.6
         +
-        clamp(ret60, -0.40, 0.40)
-        * 0.40
+        clamp(ret60, -0.40, 0.40) * 0.4
     )
 
-    scale = np.sqrt(
-        days / 5
-    )
+    scale = np.sqrt(days / 5)
 
     expected = (
-        strength
-        * atr
-        * scale
-        * 0.60
+        strength * atr * scale * 0.6
         +
-        momentum
-        * min(days / 60, 1)
-        * 0.35
+        momentum * min(days / 60, 1) * 0.35
     )
 
-    center = (
-        close *
-        (1 + expected)
-    )
+    center = close * (1 + expected)
 
     width = max(
         atr * scale * 1.15,
         0.025
     )
 
-    low = (
-        center *
-        (1 - width)
-    )
-
-    high = (
-        center *
-        (1 + width)
-    )
+    low = center * (1 - width)
+    high = center * (1 + width)
 
     if score >= 60:
 
         direction = "偏强"
 
-        probability = clamp(
-            50 +
-            (score - 50) * 0.7,
-            50,
-            80
+        probability = int(
+            clamp(
+                50 + (score - 50) * 0.7,
+                50,
+                80
+            )
         )
 
     elif score <= 40:
 
         direction = "偏弱"
 
-        probability = clamp(
-            50 +
-            (50 - score) * 0.7,
-            50,
-            80
+        probability = int(
+            clamp(
+                50 + (50 - score) * 0.7,
+                50,
+                80
+            )
         )
 
     else:
@@ -528,32 +372,24 @@ def forecast(
 
     return (
         direction,
-        int(probability),
+        probability,
         low,
         center,
         high
     )
 
 
-# ============================================================
-# ④ 基本资料
-# 缓存6小时
-# ============================================================
+# =========================
+# 公司基本资料
+# =========================
 
-@st.cache_data(
-    ttl=21600,
-    show_spinner=False
-)
-def get_basic_info(code):
-
-    result = {}
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_basic(code):
 
     try:
 
-        df = (
-            ak.stock_individual_info_em(
-                symbol=code
-            )
+        df = ak.stock_individual_info_em(
+            symbol=code
         )
 
         if (
@@ -563,7 +399,7 @@ def get_basic_info(code):
             and "value" in df.columns
         ):
 
-            result = dict(
+            return dict(
                 zip(
                     df["item"],
                     df["value"]
@@ -573,18 +409,14 @@ def get_basic_info(code):
     except:
         pass
 
-    return result
+    return {}
 
 
-# ============================================================
-# ⑤ 财务指标
-# 按需加载
-# ============================================================
+# =========================
+# 财务指标
+# =========================
 
-@st.cache_data(
-    ttl=21600,
-    show_spinner=False
-)
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_financial(code):
 
     result = {
@@ -592,14 +424,9 @@ def get_financial(code):
         "roe": None,
         "gross": None,
         "net_margin": None,
-        "debt": None,
-        "revenue": None,
-        "revenue_yoy": None,
-        "profit": None,
-        "profit_yoy": None
+        "debt": None
     }
 
-    # 财务分析指标
     try:
 
         df = (
@@ -608,155 +435,58 @@ def get_financial(code):
             )
         )
 
-        if (
-            df is not None
-            and not df.empty
+        if df is None or df.empty:
+            return result
+
+        if not isinstance(
+            df.index,
+            pd.RangeIndex
         ):
+            df = df.reset_index()
 
-            if not isinstance(
-                df.index,
-                pd.RangeIndex
-            ):
+        row = df.iloc[0].to_dict()
 
-                df = df.reset_index()
-
-            row = (
-                df.iloc[0]
-                .to_dict()
-            )
-
-            result["report"] = (
-                get_item(
-                    row,
-                    [
-                        "日期",
-                        "报告期",
-                        "index"
-                    ]
-                )
-                or "--"
-            )
-
-            result["roe"] = (
-                get_item(
-                    row,
-                    [
-                        "加权净资产收益率(%)",
-                        "摊薄净资产收益率(%)",
-                        "净资产收益率(%)"
-                    ]
-                )
-            )
-
-            result["gross"] = (
-                get_item(
-                    row,
-                    [
-                        "销售毛利率(%)",
-                        "毛利率(%)"
-                    ]
-                )
-            )
-
-            result["net_margin"] = (
-                get_item(
-                    row,
-                    [
-                        "销售净利率(%)",
-                        "净利率(%)"
-                    ]
-                )
-            )
-
-            result["debt"] = (
-                get_item(
-                    row,
-                    ["资产负债率(%)"]
-                )
-            )
-
-    except:
-        pass
-
-    # 利润表
-    try:
-
-        df = (
-            ak.stock_profit_sheet_by_report_em(
-                symbol=exchange_code(code)
-            )
-        )
-
-        if (
-            df is not None
-            and not df.empty
-        ):
-
-            row = (
-                df.iloc[0]
-                .to_dict()
-            )
-
-            report = get_item(
+        result["report"] = str(
+            pick(
                 row,
                 [
-                    "REPORT_DATE",
-                    "报告日期",
-                    "报告期"
+                    "日期",
+                    "报告期",
+                    "index"
                 ]
             )
+            or "--"
+        )
 
-            if report is not None:
+        result["roe"] = pick(
+            row,
+            [
+                "加权净资产收益率(%)",
+                "摊薄净资产收益率(%)",
+                "净资产收益率(%)"
+            ]
+        )
 
-                result["report"] = (
-                    str(report)[:10]
-                )
+        result["gross"] = pick(
+            row,
+            [
+                "销售毛利率(%)",
+                "毛利率(%)"
+            ]
+        )
 
-            result["revenue"] = (
-                get_item(
-                    row,
-                    [
-                        "TOTAL_OPERATE_INCOME",
-                        "OPERATE_INCOME",
-                        "营业总收入",
-                        "营业收入"
-                    ]
-                )
-            )
+        result["net_margin"] = pick(
+            row,
+            [
+                "销售净利率(%)",
+                "净利率(%)"
+            ]
+        )
 
-            result["revenue_yoy"] = (
-                get_item(
-                    row,
-                    [
-                        "TOTAL_OPERATE_INCOME_YOY",
-                        "OPERATE_INCOME_YOY",
-                        "营业收入同比"
-                    ]
-                )
-            )
-
-            result["profit"] = (
-                get_item(
-                    row,
-                    [
-                        "PARENT_NETPROFIT",
-                        "NETPROFIT",
-                        "归属于母公司股东的净利润",
-                        "净利润"
-                    ]
-                )
-            )
-
-            result["profit_yoy"] = (
-                get_item(
-                    row,
-                    [
-                        "PARENT_NETPROFIT_YOY",
-                        "NETPROFIT_YOY",
-                        "净利润同比"
-                    ]
-                )
-            )
+        result["debt"] = pick(
+            row,
+            ["资产负债率(%)"]
+        )
 
     except:
         pass
@@ -764,48 +494,32 @@ def get_financial(code):
     return result
 
 
-# ============================================================
-# ⑥ 行业景气
-# 按需加载
-# ============================================================
+# =========================
+# 行业景气
+# =========================
 
-@st.cache_data(
-    ttl=3600,
-    show_spinner=False
-)
-def get_industry(industry):
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_industry(name):
 
-    if not industry:
+    if not name:
         return None
 
     try:
 
-        end = (
-            datetime.now()
-            .strftime("%Y%m%d")
-        )
+        end = datetime.now().strftime("%Y%m%d")
 
         start = (
             datetime.now()
             - timedelta(days=160)
         ).strftime("%Y%m%d")
 
-        df = (
-            ak.stock_board_industry_hist_em(
-                symbol=industry,
-                start_date=start,
-                end_date=end,
-                period="日k",
-                adjust=""
-            )
+        df = ak.stock_board_industry_hist_em(
+            symbol=name,
+            start_date=start,
+            end_date=end,
+            period="日k",
+            adjust=""
         )
-
-        if (
-            df is None
-            or len(df) < 60
-        ):
-
-            return None
 
         close = pd.to_numeric(
             df["收盘"],
@@ -815,19 +529,8 @@ def get_industry(industry):
         if len(close) < 60:
             return None
 
-        ma20 = (
-            close
-            .rolling(20)
-            .mean()
-            .iloc[-1]
-        )
-
-        ma60 = (
-            close
-            .rolling(60)
-            .mean()
-            .iloc[-1]
-        )
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma60 = close.rolling(60).mean().iloc[-1]
 
         ret20 = (
             close.iloc[-1]
@@ -837,42 +540,22 @@ def get_industry(industry):
 
         score = 50
 
-        score += (
-            15
-            if close.iloc[-1] > ma20
-            else -15
-        )
+        score += 15 if close.iloc[-1] > ma20 else -15
+        score += 15 if ma20 > ma60 else -15
+        score += 15 if ret20 > 0 else -15
 
-        score += (
-            15
-            if ma20 > ma60
-            else -15
-        )
-
-        score += (
-            15
-            if ret20 > 0
-            else -15
-        )
-
-        score = int(
-            clamp(score, 0, 100)
-        )
+        score = int(clamp(score, 0, 100))
 
         if score >= 70:
-
             label = "🔥 高景气"
 
         elif score >= 55:
-
             label = "🟢 景气改善"
 
         elif score >= 40:
-
             label = "⚪ 中性"
 
         else:
-
             label = "🔵 景气偏弱"
 
         return {
@@ -882,53 +565,37 @@ def get_industry(industry):
         }
 
     except:
-
         return None
 
 
-# ============================================================
-# ⑦ 资金流
-# 按需加载
-# ============================================================
+# =========================
+# 资金流
+# =========================
 
-@st.cache_data(
-    ttl=900,
-    show_spinner=False
-)
-def get_fund_flow(code):
+@st.cache_data(ttl=900, show_spinner=False)
+def get_flow(code):
 
     try:
 
-        market = market_prefix(code)
-
-        df = (
-            ak.stock_individual_fund_flow(
-                stock=code,
-                market=market
-            )
+        df = ak.stock_individual_fund_flow(
+            stock=code,
+            market=prefix(code)
         )
 
-        if (
-            df is None
-            or df.empty
-        ):
-
+        if df is None or df.empty:
             return None
 
-        row = (
-            df.iloc[-1]
-            .to_dict()
-        )
+        row = df.iloc[-1].to_dict()
 
         return {
-            "main": get_item(
+            "main": pick(
                 row,
                 [
                     "主力净流入-净额",
                     "主力净流入净额"
                 ]
             ),
-            "ratio": get_item(
+            "ratio": pick(
                 row,
                 [
                     "主力净流入-净占比",
@@ -938,62 +605,47 @@ def get_fund_flow(code):
         }
 
     except:
-
         return None
 
 
-# ============================================================
-# ⑧ 公告 / 订单
-# 按需加载
-# ============================================================
+# =========================
+# 公告
+# =========================
 
-POSITIVE_WORDS = [
-    "中标",
-    "合同",
-    "订单",
-    "回购",
-    "增持",
-    "预增",
-    "扭亏",
-    "重大项目",
-    "战略合作",
-    "获批"
-]
-
-NEGATIVE_WORDS = [
-    "减持",
-    "亏损",
-    "处罚",
-    "立案",
-    "风险提示",
-    "诉讼",
-    "终止",
-    "下修",
-    "预亏",
-    "退市"
-]
-
-
-@st.cache_data(
-    ttl=1800,
-    show_spinner=False
-)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_notices(code):
+
+    positive_words = [
+        "中标",
+        "合同",
+        "订单",
+        "回购",
+        "增持",
+        "预增",
+        "扭亏",
+        "重大项目",
+        "战略合作",
+        "获批"
+    ]
+
+    negative_words = [
+        "减持",
+        "亏损",
+        "处罚",
+        "立案",
+        "风险提示",
+        "诉讼",
+        "终止",
+        "下修",
+        "预亏",
+        "退市"
+    ]
 
     try:
 
-        df = (
-            ak.stock_individual_notice_report(
-                symbol=code
-            )
+        df = ak.stock_individual_notice_report(
+            symbol=code
         )
-
-        if (
-            df is None
-            or df.empty
-        ):
-
-            return []
 
         result = []
 
@@ -1015,101 +667,50 @@ def get_notices(code):
 
             positive = any(
                 word in title
-                for word in POSITIVE_WORDS
+                for word in positive_words
             )
 
             negative = any(
                 word in title
-                for word in NEGATIVE_WORDS
+                for word in negative_words
             )
 
-            if not (
-                positive
-                or negative
-            ):
+            if not positive and not negative:
                 continue
 
-            if (
-                positive
-                and not negative
-            ):
+            if positive and not negative:
+                kind = "🟢 潜在正反馈"
 
-                kind = (
-                    "🟢 潜在正反馈"
-                )
-
-            elif (
-                negative
-                and not positive
-            ):
-
-                kind = (
-                    "🔴 潜在风险"
-                )
+            elif negative and not positive:
+                kind = "🔴 潜在风险"
 
             else:
-
-                kind = (
-                    "🟡 需人工判断"
-                )
+                kind = "🟡 需判断"
 
             result.append(
                 {
                     "date": date,
-                    "title": title,
-                    "type": kind
+                    "type": kind,
+                    "title": title
                 }
             )
 
-        return result[:10]
+        return result[:8]
 
     except:
-
         return []
 
 
-# ============================================================
-# ⑨ 市场温度
-# 10分钟缓存
-# ============================================================
+# =========================
+# 市场温度
+# =========================
 
-def temperature_label(t):
-
-    if t is None:
-        return "数据暂缺"
-
-    if t <= -80:
-        return "🥶 极度恐慌"
-
-    if t <= -50:
-        return "❄️ 恐慌"
-
-    if t <= -20:
-        return "🔵 偏冷"
-
-    if t < 20:
-        return "⚪ 平衡"
-
-    if t < 50:
-        return "🟡 回暖"
-
-    if t < 80:
-        return "🔥 火热"
-
-    return "🌋 过热"
-
-
-@st.cache_data(
-    ttl=600,
-    show_spinner=False
-)
-def get_market_temperature():
+@st.cache_data(ttl=600, show_spinner=False)
+def get_temperature():
 
     try:
 
-        df = (
-            ak.stock_zh_a_spot_em()
-        )
+        df = ak.stock_zh_a_spot_em()
 
         pct = pd.to_numeric(
             df["涨跌幅"],
@@ -1117,33 +718,15 @@ def get_market_temperature():
         ).dropna()
 
         if len(pct) < 500:
+            raise ValueError("样本不足")
 
-            raise ValueError(
-                "市场样本不足"
-            )
-
-        total = len(pct)
-
-        up = int(
-            (pct > 0).sum()
-        )
-
-        down = int(
-            (pct < 0).sum()
-        )
+        up = int((pct > 0).sum())
+        down = int((pct < 0).sum())
 
         breadth = (
             (up - down)
-            / total
+            / len(pct)
             * 100
-        )
-
-        median = float(
-            pct.median()
-        )
-
-        mean = float(
-            pct.mean()
         )
 
         strong = (
@@ -1152,45 +735,36 @@ def get_market_temperature():
                 -
                 (pct <= -5).sum()
             )
-            / total
+            / len(pct)
             * 100
-        )
-
-        strong_up = int(
-            (pct >= 9.5).sum()
-        )
-
-        strong_down = int(
-            (pct <= -9.5).sum()
         )
 
         extreme = clamp(
             (
-                strong_up
+                (pct >= 9.5).sum()
                 -
-                strong_down
-            )
-            * 2,
+                (pct <= -9.5).sum()
+            ) * 2,
             -100,
             100
         )
 
         temp = (
-            breadth * 0.35
+            breadth * 0.40
             +
             clamp(
-                median * 25,
+                pct.median() * 25,
                 -100,
                 100
             ) * 0.25
             +
             clamp(
-                mean * 20,
+                pct.mean() * 20,
                 -100,
                 100
             ) * 0.15
             +
-            extreme * 0.15
+            extreme * 0.10
             +
             clamp(
                 strong * 8,
@@ -1209,252 +783,62 @@ def get_market_temperature():
             )
         )
 
+        if temp <= -80:
+            label = "🥶 极度恐慌"
+
+        elif temp <= -50:
+            label = "❄️ 恐慌"
+
+        elif temp <= -20:
+            label = "🔵 偏冷"
+
+        elif temp < 20:
+            label = "⚪ 平衡"
+
+        elif temp < 50:
+            label = "🟡 回暖"
+
+        elif temp < 80:
+            label = "🔥 火热"
+
+        else:
+            label = "🌋 过热"
+
         return {
             "temp": temp,
-            "label":
-                temperature_label(temp),
+            "label": label,
             "up": up,
-            "down": down,
-            "strong_up": strong_up,
-            "strong_down":
-                strong_down,
-            "median": median,
-            "status": "正常"
+            "down": down
         }
 
-    except Exception as e:
-
+    except:
         return {
             "temp": None,
-            "label": "数据暂缺",
-            "status": "降级",
-            "error": str(e)
+            "label": "数据暂缺"
         }
 
 
-# ============================================================
-# ⑩ 首屏 FAST 分析
-# ============================================================
-
-def fast_analyse(code):
-
-    df = get_price_data(code)
-
-    (
-        df,
-        score,
-        state,
-        risk,
-        atr
-    ) = technical_engine(df)
-
-    x = df.iloc[-1]
-
-    return {
-        "df": df,
-        "x": x,
-        "score": score,
-        "state": state,
-        "risk": risk,
-        "atr": atr
-    }
-
-
-# ============================================================
-# 综合评分
-# ============================================================
-
-def weighted_score(
-    tech,
-    fundamental=None,
-    industry=None,
-    temperature=None
-):
-
-    components = [
-        (tech, 0.50)
-    ]
-
-    if fundamental is not None:
-
-        components.append(
-            (
-                fundamental,
-                0.25
-            )
-        )
-
-    if industry is not None:
-
-        components.append(
-            (
-                industry,
-                0.15
-            )
-        )
-
-    if temperature is not None:
-
-        market_score = (
-            temperature + 100
-        ) / 2
-
-        # 过热风险反馈
-        if temperature > 80:
-
-            market_score -= (
-                temperature - 80
-            ) * 1.5
-
-        components.append(
-            (
-                clamp(
-                    market_score,
-                    0,
-                    100
-                ),
-                0.10
-            )
-        )
-
-    total_weight = sum(
-        w
-        for _, w
-        in components
-    )
-
-    return int(
-        sum(
-            value * weight
-            for value, weight
-            in components
-        )
-        / total_weight
-    )
-
-
-# ============================================================
-# 基本面评分
-# ============================================================
-
-def fundamental_score(fin):
-
-    scores = []
-
-    roe = safe_num(
-        fin.get("roe")
-    )
-
-    revenue_yoy = safe_num(
-        fin.get("revenue_yoy")
-    )
-
-    profit_yoy = safe_num(
-        fin.get("profit_yoy")
-    )
-
-    gross = safe_num(
-        fin.get("gross")
-    )
-
-    debt = safe_num(
-        fin.get("debt")
-    )
-
-    if pd.notna(roe):
-
-        scores.append(
-            clamp(
-                50
-                +
-                (roe - 10) * 2,
-                0,
-                100
-            )
-        )
-
-    if pd.notna(revenue_yoy):
-
-        scores.append(
-            clamp(
-                50
-                +
-                revenue_yoy,
-                0,
-                100
-            )
-        )
-
-    if pd.notna(profit_yoy):
-
-        scores.append(
-            clamp(
-                50
-                +
-                profit_yoy * 0.6,
-                0,
-                100
-            )
-        )
-
-    if pd.notna(gross):
-
-        scores.append(
-            clamp(
-                40 + gross,
-                0,
-                100
-            )
-        )
-
-    if pd.notna(debt):
-
-        scores.append(
-            clamp(
-                100 - debt,
-                0,
-                100
-            )
-        )
-
-    if not scores:
-
-        return None
-
-    return int(
-        np.mean(scores)
-    )
-
-
-# ============================================================
+# =========================
 # 个股页面
-# ============================================================
+# =========================
 
 def stock_page():
 
-    st.subheader(
-        "🔎 个股控制台"
-    )
+    code = st.text_input(
+        "股票代码",
+        placeholder="例如 000977",
+        max_chars=6
+    ).strip()
 
-    code = (
-        st.text_input(
-            "股票代码",
-            placeholder="例如 000977",
-            max_chars=6
-        )
-        .strip()
-    )
-
-    if st.button(
+    analyse_button = st.button(
         "⚡ 开始快速分析",
         type="primary",
         use_container_width=True
-    ):
+    )
 
-        if (
-            len(code) != 6
-            or not code.isdigit()
-        ):
+    if analyse_button:
+
+        if len(code) != 6 or not code.isdigit():
 
             st.error(
                 "请输入6位股票代码"
@@ -1468,115 +852,109 @@ def stock_page():
                     "正在读取行情..."
                 ):
 
-                    result = (
-                        fast_analyse(code)
-                    )
+                    df = get_prices(code)
 
-                st.session_state[
-                    "fast_result"
-                ] = result
+                    (
+                        df,
+                        score,
+                        state,
+                        risk,
+                        atr
+                    ) = technical_engine(df)
 
-                st.session_state[
-                    "current_code"
-                ] = code
+                st.session_state["fast"] = {
+                    "code": code,
+                    "df": df,
+                    "score": score,
+                    "state": state,
+                    "risk": risk,
+                    "atr": atr
+                }
 
-            except Exception as e:
+            except Exception as error:
 
                 st.error(
-                    "行情获取失败"
+                    f"行情获取失败：{error}"
                 )
 
-                st.caption(
-                    str(e)
-                )
+    result = st.session_state.get("fast")
 
-    if (
-        "fast_result"
-        not in st.session_state
-        or
-        st.session_state.get(
-            "current_code"
-        ) != code
-    ):
-
+    if not result:
         return
 
-    r = (
-        st.session_state[
-            "fast_result"
-        ]
+    if result["code"] != code:
+        return
+
+    df = result["df"]
+    row = df.iloc[-1]
+
+    basic = get_basic(code)
+
+    stock_name = (
+        pick(
+            basic,
+            [
+                "股票简称",
+                "名称"
+            ]
+        )
+        or code
     )
 
-    x = r["x"]
-
-    # --------------------------------------------------------
-    # FAST首屏
-    # --------------------------------------------------------
-
     st.success(
-        "⚡ 快速数据已完成"
+        "⚡ 快速分析完成"
     )
 
     st.header(
-        f"{code}"
+        f"{stock_name} · {code}"
     )
 
     st.caption(
-        "行情日期："
-        +
-        x["date"]
-        .strftime("%Y-%m-%d")
+        f"行情日期："
+        f"{row['date'].strftime('%Y-%m-%d')}"
     )
 
-    a, b, c = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
-    a.metric(
-        "技术评分",
-        r["score"]
+    col1.metric(
+        "技术分",
+        result["score"]
     )
 
-    b.metric(
+    col2.metric(
         "状态",
-        r["state"]
+        result["state"]
     )
 
-    c.metric(
+    col3.metric(
         "风险",
-        r["risk"]
+        result["risk"]
     )
 
     st.metric(
         "最新收盘",
-        f"{x['close']:.2f}"
+        f"{row['close']:.2f}"
     )
-
-    # --------------------------------------------------------
-    # 预测
-    # --------------------------------------------------------
-
-    st.subheader(
-        "🔮 概率情景"
-    )
-
-    forecasts = []
 
     ret20 = (
-        float(x["RET20"])
-        if pd.notna(x["RET20"])
+        float(row["RET20"])
+        if pd.notna(row["RET20"])
         else 0
     )
 
     ret60 = (
-        float(x["RET60"])
-        if pd.notna(x["RET60"])
+        float(row["RET60"])
+        if pd.notna(row["RET60"])
         else 0
     )
 
-    for days in [
-        5,
-        20,
-        60
-    ]:
+    st.subheader(
+        "🔮 5 / 20 / 60日概率情景"
+    )
+
+    forecast_rows = []
+
+    for days in [5, 20, 60]:
 
         (
             direction,
@@ -1585,86 +963,52 @@ def stock_page():
             center,
             high
         ) = forecast(
-            float(x["close"]),
-            r["score"],
-            r["atr"],
+            float(row["close"]),
+            result["score"],
+            result["atr"],
             ret20,
             ret60,
             days
         )
 
-        forecasts.append(
+        forecast_rows.append(
             {
-                "周期":
-                    f"{days}日",
-
-                "情景":
-                    direction,
-
-                "概率":
-                    f"{probability}%",
-
-                "中枢":
-                    round(
-                        center,
-                        2
-                    ),
-
+                "周期": f"{days}日",
+                "情景": direction,
+                "概率": f"{probability}%",
+                "中枢": round(center, 2),
                 "参考区间":
-                    (
-                        f"{low:.2f}"
-                        f"～"
-                        f"{high:.2f}"
-                    )
+                    f"{low:.2f}～{high:.2f}"
             }
         )
 
     st.dataframe(
-        pd.DataFrame(
-            forecasts
-        ),
+        pd.DataFrame(forecast_rows),
         hide_index=True,
         use_container_width=True
     )
 
-    # --------------------------------------------------------
-    # 支撑压力
-    # --------------------------------------------------------
+    support = df["low"].tail(20).min()
+    resistance = df["high"].tail(20).max()
 
-    support = (
-        r["df"]["low"]
-        .tail(20)
-        .min()
-    )
+    col1, col2 = st.columns(2)
 
-    resistance = (
-        r["df"]["high"]
-        .tail(20)
-        .max()
-    )
-
-    a, b = st.columns(2)
-
-    a.metric(
+    col1.metric(
         "20日支撑",
         f"{support:.2f}"
     )
 
-    b.metric(
+    col2.metric(
         "20日压力",
         f"{resistance:.2f}"
     )
 
-    # --------------------------------------------------------
-    # 技术图
-    # --------------------------------------------------------
-
     with st.expander(
-        "📊 查看技术趋势"
+        "📊 技术趋势"
     ):
 
         st.line_chart(
-            r["df"][
+            df[
                 [
                     "date",
                     "close",
@@ -1676,44 +1020,24 @@ def stock_page():
             .set_index("date")
         )
 
-        a, b = st.columns(2)
-
-        a.metric(
-            "RSI14",
-            fmt_num(
-                x["RSI"]
+        if pd.notna(row["RSI"]):
+            st.write(
+                f"RSI14：{row['RSI']:.1f}"
             )
-        )
 
-        b.metric(
-            "ATR%",
-            (
-                f"{r['atr']*100:.2f}%"
-            )
+        st.write(
+            f"ATR波动率："
+            f"{result['atr'] * 100:.2f}%"
         )
 
         st.write(
-            "MA20：",
-            fmt_num(
-                x["MA20"]
-            )
+            f"20日涨跌："
+            f"{ret20 * 100:+.2f}%"
         )
 
         st.write(
-            "MA60：",
-            fmt_num(
-                x["MA60"]
-            )
-        )
-
-        st.write(
-            "20日涨跌：",
-            f"{ret20*100:+.2f}%"
-        )
-
-        st.write(
-            "60日涨跌：",
-            f"{ret60*100:+.2f}%"
+            f"60日涨跌："
+            f"{ret60 * 100:+.2f}%"
         )
 
     st.divider()
@@ -1723,433 +1047,262 @@ def stock_page():
     )
 
     st.caption(
-        "下面模块只有点击后才联网，"
-        "因此不会拖慢首屏。"
+        "以下数据按需加载，不拖慢首屏。"
     )
 
-    # ========================================================
-    # 基本面按钮
-    # ========================================================
-
+    # 基本面
     if st.button(
         "🏢 加载基本面 / 估值",
         use_container_width=True
     ):
 
         with st.spinner(
-            "读取基本面..."
+            "读取财务数据..."
         ):
 
-            basic = (
-                get_basic_info(code)
-            )
+            financial = get_financial(code)
 
-            fin = (
-                get_financial(code)
-            )
+        st.session_state["financial"] = {
+            "code": code,
+            "data": financial
+        }
 
-        st.session_state[
-            "basic_data"
-        ] = basic
-
-        st.session_state[
-            "financial_data"
-        ] = fin
-
-        st.session_state[
-            "basic_code"
-        ] = code
+    financial_result = (
+        st.session_state.get(
+            "financial"
+        )
+    )
 
     if (
-        st.session_state.get(
-            "basic_code"
-        ) == code
+        financial_result
+        and financial_result["code"] == code
     ):
 
-        basic = (
-            st.session_state.get(
-                "basic_data",
-                {}
-            )
-        )
-
-        fin = (
-            st.session_state.get(
-                "financial_data",
-                {}
-            )
-        )
+        f = financial_result["data"]
 
         st.markdown(
-            "### 🏢 基本面"
+            "### 🏢 基本面 / 估值"
         )
 
-        name = (
-            get_item(
-                basic,
-                [
-                    "股票简称",
-                    "名称"
-                ]
-            )
-            or "--"
+        pe = pick(
+            basic,
+            [
+                "市盈率(TTM)",
+                "市盈率-动态"
+            ]
         )
 
-        industry = (
-            get_item(
-                basic,
-                [
-                    "行业",
-                    "所属行业"
-                ]
-            )
-            or "--"
+        pb = pick(
+            basic,
+            ["市净率"]
+        )
+
+        market_cap = pick(
+            basic,
+            ["总市值"]
+        )
+
+        col1, col2 = st.columns(2)
+
+        col1.metric(
+            "PE",
+            pe if pe is not None else "--"
+        )
+
+        col2.metric(
+            "PB",
+            pb if pb is not None else "--"
         )
 
         st.write(
-            f"**名称：** {name}"
-        )
-
-        st.write(
-            f"**行业：** {industry}"
+            "总市值：",
+            money(market_cap)
         )
 
         st.caption(
-            "报告期："
+            "财务报告期："
             +
-            str(
-                fin.get(
-                    "report",
-                    "--"
-                )
-            )
+            str(f["report"])
         )
 
-        fs = (
-            fundamental_score(fin)
-        )
+        roe = num(f["roe"])
+        gross = num(f["gross"])
 
-        st.metric(
-            "基本面评分",
-            "--"
-            if fs is None
-            else fs
-        )
+        col1, col2 = st.columns(2)
 
-        a, b = st.columns(2)
-
-        roe = safe_num(
-            fin.get("roe")
-        )
-
-        gross = safe_num(
-            fin.get("gross")
-        )
-
-        a.metric(
+        col1.metric(
             "ROE",
             "--"
             if pd.isna(roe)
             else f"{roe:.2f}%"
         )
 
-        b.metric(
+        col2.metric(
             "毛利率",
             "--"
             if pd.isna(gross)
             else f"{gross:.2f}%"
         )
 
-        a, b = st.columns(2)
-
-        margin = safe_num(
-            fin.get(
-                "net_margin"
-            )
+        net_margin = num(
+            f["net_margin"]
         )
 
-        debt = safe_num(
-            fin.get("debt")
+        debt = num(
+            f["debt"]
         )
 
-        a.metric(
+        col1, col2 = st.columns(2)
+
+        col1.metric(
             "净利率",
             "--"
-            if pd.isna(margin)
-            else f"{margin:.2f}%"
+            if pd.isna(net_margin)
+            else f"{net_margin:.2f}%"
         )
 
-        b.metric(
+        col2.metric(
             "资产负债率",
             "--"
             if pd.isna(debt)
             else f"{debt:.2f}%"
         )
 
-        st.write(
-            "**营业收入：**",
-            fmt_money(
-                fin.get(
-                    "revenue"
-                )
-            )
-        )
-
-        rg = safe_num(
-            fin.get(
-                "revenue_yoy"
-            )
-        )
-
-        st.write(
-            "**营收同比：**",
-            "--"
-            if pd.isna(rg)
-            else f"{rg:+.2f}%"
-        )
-
-        st.write(
-            "**归母净利润：**",
-            fmt_money(
-                fin.get(
-                    "profit"
-                )
-            )
-        )
-
-        pg = safe_num(
-            fin.get(
-                "profit_yoy"
-            )
-        )
-
-        st.write(
-            "**净利润同比：**",
-            "--"
-            if pd.isna(pg)
-            else f"{pg:+.2f}%"
-        )
-
-        pe = get_item(
-            basic,
-            [
-                "市盈率(TTM)",
-                "市盈率-动态",
-                "市盈率(动)"
-            ]
-        )
-
-        pb = get_item(
-            basic,
-            ["市净率"]
-        )
-
-        cap = get_item(
-            basic,
-            ["总市值"]
-        )
-
-        a, b = st.columns(2)
-
-        a.metric(
-            "PE",
-            "--"
-            if pe is None
-            else pe
-        )
-
-        b.metric(
-            "PB",
-            "--"
-            if pb is None
-            else pb
-        )
-
-        st.write(
-            "**总市值：**",
-            fmt_money(cap)
-        )
-
-    # ========================================================
-    # 行业按钮
-    # ========================================================
-
+    # 行业
     if st.button(
         "🏭 加载行业景气",
         use_container_width=True
     ):
 
+        industry_name = pick(
+            basic,
+            [
+                "行业",
+                "所属行业"
+            ]
+        )
+
         with st.spinner(
-            "读取行业..."
+            "读取行业数据..."
         ):
 
-            basic = (
-                get_basic_info(code)
+            industry = get_industry(
+                industry_name
             )
 
-            industry = (
-                get_item(
-                    basic,
-                    [
-                        "行业",
-                        "所属行业"
-                    ]
-                )
-            )
+        st.session_state["industry"] = {
+            "code": code,
+            "name": industry_name,
+            "data": industry
+        }
 
-            industry_result = (
-                get_industry(
-                    industry
-                )
-                if industry
-                else None
-            )
-
-        st.session_state[
-            "industry_name"
-        ] = industry
-
-        st.session_state[
-            "industry_result"
-        ] = industry_result
-
-        st.session_state[
-            "industry_code"
-        ] = code
+    industry_result = (
+        st.session_state.get(
+            "industry"
+        )
+    )
 
     if (
-        st.session_state.get(
-            "industry_code"
-        ) == code
+        industry_result
+        and industry_result["code"] == code
     ):
 
         st.markdown(
             "### 🏭 行业景气"
         )
 
-        industry = (
-            st.session_state.get(
-                "industry_name"
-            )
-        )
-
-        ind = (
-            st.session_state.get(
-                "industry_result"
-            )
-        )
-
         st.write(
-            "**所属行业：**",
-            industry or "--"
+            "所属行业：",
+            industry_result["name"]
+            or "--"
         )
 
-        if ind:
+        industry = (
+            industry_result["data"]
+        )
 
-            a, b = st.columns(2)
+        if industry:
 
-            a.metric(
+            col1, col2 = st.columns(2)
+
+            col1.metric(
                 "景气分",
-                ind["score"]
+                industry["score"]
             )
 
-            b.metric(
-                "行业状态",
-                ind["label"]
+            col2.metric(
+                "状态",
+                industry["label"]
             )
 
             st.write(
-                "20日行业走势：",
-                f"{ind['ret20']:+.2f}%"
+                f"行业20日走势："
+                f"{industry['ret20']:+.2f}%"
             )
 
         else:
 
             st.info(
-                "本次未取得可靠行业行情。"
+                "本次行业数据暂缺。"
             )
 
-    # ========================================================
-    # 资金按钮
-    # ========================================================
-
+    # 资金
     if st.button(
         "💵 加载资金流",
         use_container_width=True
     ):
 
         with st.spinner(
-            "读取资金流..."
+            "读取资金数据..."
         ):
 
-            flow = (
-                get_fund_flow(code)
-            )
+            flow = get_flow(code)
 
-        st.session_state[
-            "flow_data"
-        ] = flow
+        st.session_state["flow"] = {
+            "code": code,
+            "data": flow
+        }
 
-        st.session_state[
-            "flow_code"
-        ] = code
+    flow_result = (
+        st.session_state.get("flow")
+    )
 
     if (
-        st.session_state.get(
-            "flow_code"
-        ) == code
+        flow_result
+        and flow_result["code"] == code
     ):
 
         st.markdown(
-            "### 💵 资金"
+            "### 💵 资金流"
         )
 
-        flow = (
-            st.session_state.get(
-                "flow_data"
-            )
-        )
+        flow = flow_result["data"]
 
         if flow:
 
-            a, b = st.columns(2)
+            col1, col2 = st.columns(2)
 
-            a.metric(
+            col1.metric(
                 "主力净流入",
-                fmt_money(
-                    flow.get(
-                        "main"
-                    )
-                )
+                money(flow["main"])
             )
 
-            b.metric(
+            col2.metric(
                 "主力净占比",
-                (
-                    "--"
-                    if flow.get(
-                        "ratio"
-                    ) is None
-                    else str(
-                        flow.get(
-                            "ratio"
-                        )
-                    )
-                )
+                flow["ratio"]
+                if flow["ratio"] is not None
+                else "--"
             )
 
         else:
 
             st.info(
-                "本次未取得可靠资金流数据。"
+                "本次资金流数据暂缺。"
             )
 
-    # ========================================================
-    # 公告按钮
-    # ========================================================
-
+    # 公告
     if st.button(
-        "📦 加载订单 / 利好 / 风险",
+        "📦 加载订单 / 公告",
         use_container_width=True
     ):
 
@@ -2157,22 +1310,215 @@ def stock_page():
             "读取近期公告..."
         ):
 
-            notice_data = (
-                get_notices(code)
+            notice_data = get_notices(
+                code
             )
 
-        st.session_state[
-            "notice_data"
-        ] = notice_data
+        st.session_state["notices"] = {
+            "code": code,
+            "data": notice_data
+        }
 
-        st.session_state[
-            "notice_code"
-        ] = code
+    notice_result = (
+        st.session_state.get(
+            "notices"
+        )
+    )
 
     if (
-        st.session_state.get(
-            "notice_code"
-        ) == code
+        notice_result
+        and notice_result["code"] == code
     ):
 
-       
+        st.markdown(
+            "### 📦 订单 · 催化 · 风险"
+        )
+
+        notice_data = (
+            notice_result["data"]
+        )
+
+        if not notice_data:
+
+            st.info(
+                "近期未识别到相关公告。"
+                "这不代表公司不存在相关事项。"
+            )
+
+        for notice in notice_data:
+
+            with st.container(
+                border=True
+            ):
+
+                st.write(
+                    f"**{notice['type']}**"
+                )
+
+                st.write(
+                    notice["title"]
+                )
+
+                st.caption(
+                    notice["date"]
+                    +
+                    " ｜ 公司公开公告"
+                )
+
+        st.caption(
+            "公告只进行关键词初筛，"
+            "不自动认定为确定性利好或利空。"
+        )
+
+
+# =========================
+# 温度页面
+# =========================
+
+def temperature_page():
+
+    st.subheader(
+        "🌡️ 市场温度计"
+    )
+
+    st.caption(
+        "-100℃ ～ +100℃"
+    )
+
+    if st.button(
+        "🌡️ 测量市场温度",
+        type="primary",
+        use_container_width=True
+    ):
+
+        with st.spinner(
+            "正在扫描全A..."
+        ):
+
+            result = get_temperature()
+
+        st.session_state["temperature"] = result
+
+    result = (
+        st.session_state.get(
+            "temperature"
+        )
+    )
+
+    if not result:
+
+        st.info(
+            "温度计按需运行，"
+            "因此不会拖慢个股分析。"
+        )
+
+        return
+
+    if result["temp"] is None:
+
+        st.metric(
+            "市场温度",
+            "--℃"
+        )
+
+        st.warning(
+            "当前全A数据接口暂时不可用。"
+        )
+
+        return
+
+    col1, col2 = st.columns(2)
+
+    col1.metric(
+        "市场温度",
+        f"{result['temp']:+d}℃"
+    )
+
+    col2.metric(
+        "市场情绪",
+        result["label"]
+    )
+
+    st.progress(
+        int(
+            (result["temp"] + 100)
+            / 2
+        )
+    )
+
+    col1, col2 = st.columns(2)
+
+    col1.metric(
+        "上涨股票",
+        result["up"]
+    )
+
+    col2.metric(
+        "下跌股票",
+        result["down"]
+    )
+
+    st.caption(
+        "高温不代表一定继续上涨；"
+        "低温也不代表立即见底。"
+    )
+
+
+# =========================
+# 导航
+# =========================
+
+page = st.selectbox(
+    "功能",
+    [
+        "🔎 个股分析",
+        "🌡️ 市场温度计",
+        "⚙️ 模型说明"
+    ]
+)
+
+st.divider()
+
+if page == "🔎 个股分析":
+
+    stock_page()
+
+elif page == "🌡️ 市场温度计":
+
+    temperature_page()
+
+else:
+
+    st.subheader(
+        "⚙️ V2.3.2 Mobile Fast"
+    )
+
+    st.write(
+        """
+**快速层**
+
+行情 → MA → MACD → RSI → 动量 → ATR → 风险 → 5/20/60日情景
+
+**按需层**
+
+基本面 / 估值  
+行业景气  
+资金流  
+订单 / 公告  
+市场温度
+
+**数据原则**
+
+数据缺失显示“-- / 暂缺”，不当作0分。
+
+**实验原则**
+
+本版本先运行一周，再根据实际预测结果调整参数。
+"""
+    )
+
+st.divider()
+
+st.caption(
+    "A股工程控制论 V2.3.2 Mobile Fast"
+)
