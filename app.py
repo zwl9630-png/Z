@@ -1,1524 +1,1605 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import akshare as ak
+# -*- coding: utf-8 -*-
+"""
+A股工程控制论 V1.1
+新增：趋势变化 / 趋势加速度 ΔScore
+数据源：AKShare（免 Token）
+运行：
+    pip install -r requirements.txt
+    streamlit run app.py
+"""
+
+import math
 from datetime import datetime, timedelta
 
+import numpy as np
+import pandas as pd
+import streamlit as st
+import akshare as ak
+
+
 st.set_page_config(
-    page_title="A股工程控制论 V2.3.2",
+    page_title="A股工程控制论",
     page_icon="📈",
-    layout="centered"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-st.title("📈 A股工程控制论")
-st.caption("V2.3.2 Mobile Fast · 一周验证版")
-
-
-# =========================
+# -----------------------------
 # 基础工具
-# =========================
-
-def clamp(x, lo, hi):
-    return max(lo, min(hi, x))
-
-
-def num(x):
+# -----------------------------
+def clamp(x, lo=0.0, hi=100.0):
     try:
-        return float(str(x).replace(",", "").replace("%", ""))
-    except:
-        return np.nan
+        return float(max(lo, min(hi, x)))
+    except Exception:
+        return float(lo)
 
 
-def money(x):
+def safe_float(x, default=np.nan):
     try:
-        x = float(x)
-
-        if abs(x) >= 1e12:
-            return f"{x / 1e12:.2f}万亿"
-
-        if abs(x) >= 1e8:
-            return f"{x / 1e8:.2f}亿"
-
-        if abs(x) >= 1e4:
-            return f"{x / 1e4:.2f}万"
-
-        return f"{x:.2f}"
-
-    except:
-        return "--"
+        if pd.isna(x):
+            return default
+        if isinstance(x, str):
+            x = x.replace(",", "").replace("%", "").strip()
+        return float(x)
+    except Exception:
+        return default
 
 
-def pick(data, names):
-    if not isinstance(data, dict):
-        return None
-
-    for name in names:
-        if name in data:
-            value = data[name]
-
-            if pd.notna(value):
-                return value
-
-    return None
+def normalize_code(code: str) -> str:
+    code = str(code).strip().upper().replace("SH", "").replace("SZ", "").replace(".", "")
+    code = "".join(ch for ch in code if ch.isdigit())
+    return code.zfill(6)[-6:]
 
 
-def prefix(code):
-    if code.startswith(("5", "6", "9")):
-        return "sh"
-
-    return "sz"
+def market_symbol(code: str) -> str:
+    return normalize_code(code)
 
 
-# =========================
-# 历史行情
-# =========================
+def fmt_num(x, digits=2, empty="—"):
+    try:
+        if pd.isna(x):
+            return empty
+        return f"{float(x):.{digits}f}"
+    except Exception:
+        return empty
 
+
+def pct(x, digits=1, empty="—"):
+    try:
+        if pd.isna(x):
+            return empty
+        return f"{float(x) * 100:.{digits}f}%"
+    except Exception:
+        return empty
+
+
+# -----------------------------
+# 数据获取
+# -----------------------------
 @st.cache_data(ttl=300, show_spinner=False)
-def get_prices(code):
-
+def get_hist(code: str, days: int = 260) -> pd.DataFrame:
+    code = market_symbol(code)
     end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=max(days * 2, 500))).strftime("%Y%m%d")
 
-    start = (
-        datetime.now() - timedelta(days=500)
-    ).strftime("%Y%m%d")
+    df = ak.stock_zh_a_hist(
+        symbol=code,
+        period="daily",
+        start_date=start,
+        end_date=end,
+        adjust="qfq",
+    )
 
-    try:
+    if df is None or df.empty:
+        raise ValueError("没有获取到行情数据")
 
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=start,
-            end_date=end,
-            adjust="qfq"
-        )
+    rename_map = {
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume",
+        "成交额": "amount",
+        "振幅": "amplitude",
+        "涨跌幅": "pct_chg",
+        "涨跌额": "change",
+        "换手率": "turnover",
+    }
 
-        df = df.rename(
-            columns={
-                "日期": "date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume"
-            }
-        )
-
-        df = df[
-            [
-                "date",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume"
-            ]
-        ].copy()
-
-        df["date"] = pd.to_datetime(df["date"])
-
-        for col in [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-        ]:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
-            )
-
-        df = (
-            df.dropna()
-            .sort_values("date")
-            .reset_index(drop=True)
-        )
-
-        if len(df) >= 70:
-            return df
-
-    except:
-        pass
-
-    symbol = prefix(code) + code
-
-    df = ak.stock_zh_a_daily(
-        symbol=symbol,
-        adjust="qfq"
-    ).reset_index()
-
+    df = df.rename(columns=rename_map).copy()
     df["date"] = pd.to_datetime(df["date"])
 
-    df = df[
-        [
-            "date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-        ]
-    ].dropna()
+    for c in [
+        "open", "close", "high", "low",
+        "volume", "amount", "pct_chg", "turnover"
+    ]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df = df.tail(500).reset_index(drop=True)
-
-    if len(df) < 70:
-        raise ValueError("历史行情不足")
+    df = (
+        df.sort_values("date")
+        .dropna(subset=["close"])
+        .tail(days)
+        .reset_index(drop=True)
+    )
 
     return df
 
 
-# =========================
-# 技术控制器
-# =========================
-
-def technical_engine(df):
-
-    df = df.copy()
-
-    for period in [5, 10, 20, 60]:
-        df[f"MA{period}"] = (
-            df["close"]
-            .rolling(period)
-            .mean()
-        )
-
-    ema12 = (
-        df["close"]
-        .ewm(span=12, adjust=False)
-        .mean()
-    )
-
-    ema26 = (
-        df["close"]
-        .ewm(span=26, adjust=False)
-        .mean()
-    )
-
-    df["DIF"] = ema12 - ema26
-
-    df["DEA"] = (
-        df["DIF"]
-        .ewm(span=9, adjust=False)
-        .mean()
-    )
-
-    delta = df["close"].diff()
-
-    gain = (
-        delta.clip(lower=0)
-        .rolling(14)
-        .mean()
-    )
-
-    loss = (
-        -delta.clip(upper=0)
-        .rolling(14)
-        .mean()
-    )
-
-    rs = gain / loss.replace(0, np.nan)
-
-    df["RSI"] = 100 - 100 / (1 + rs)
-
-    df["RET20"] = df["close"].pct_change(20)
-    df["RET60"] = df["close"].pct_change(60)
-
-    df["VOL20"] = (
-        df["volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    previous_close = df["close"].shift()
-
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - previous_close).abs(),
-            (df["low"] - previous_close).abs()
-        ],
-        axis=1
-    ).max(axis=1)
-
-    df["ATR"] = tr.rolling(14).mean()
-    df["ATR_PCT"] = df["ATR"] / df["close"]
-
-    row = df.iloc[-1]
-
-    score = 50
-
-    score += 10 if row["close"] > row["MA20"] else -10
-    score += 12 if row["MA20"] > row["MA60"] else -12
-    score += 10 if row["DIF"] > row["DEA"] else -10
-    score += 8 if row["RET20"] > 0 else -8
-    score += 8 if row["RET60"] > 0 else -8
-
-    if (
-        pd.notna(row["VOL20"])
-        and row["volume"] > row["VOL20"]
-    ):
-        score += 5
-
-    if pd.notna(row["RSI"]):
-
-        if 45 <= row["RSI"] <= 70:
-            score += 5
-
-        elif row["RSI"] > 80:
-            score -= 5
-
-    score = int(clamp(score, 0, 100))
-
-    if score >= 75:
-        state = "趋势强化"
-
-    elif score >= 62:
-        state = "趋势形成"
-
-    elif score >= 45:
-        state = "震荡观察"
-
-    elif score >= 30:
-        state = "趋势减弱"
-
-    else:
-        state = "风险释放"
-
-    if pd.notna(row["ATR_PCT"]):
-        atr = float(row["ATR_PCT"])
-    else:
-        atr = 0.03
-
-    if atr > 0.06:
-        risk = "高"
-
-    elif atr > 0.04:
-        risk = "中"
-
-    else:
-        risk = "低"
-
-    return df, score, state, risk, atr
-
-
-# =========================
-# 预测模型
-# =========================
-
-def forecast(
-    close,
-    score,
-    atr,
-    ret20,
-    ret60,
-    days
-):
-
-    strength = (score - 50) / 50
-
-    momentum = (
-        clamp(ret20, -0.25, 0.25) * 0.6
-        +
-        clamp(ret60, -0.40, 0.40) * 0.4
-    )
-
-    scale = np.sqrt(days / 5)
-
-    expected = (
-        strength * atr * scale * 0.6
-        +
-        momentum * min(days / 60, 1) * 0.35
-    )
-
-    center = close * (1 + expected)
-
-    width = max(
-        atr * scale * 1.15,
-        0.025
-    )
-
-    low = center * (1 - width)
-    high = center * (1 + width)
-
-    if score >= 60:
-
-        direction = "偏强"
-
-        probability = int(
-            clamp(
-                50 + (score - 50) * 0.7,
-                50,
-                80
-            )
-        )
-
-    elif score <= 40:
-
-        direction = "偏弱"
-
-        probability = int(
-            clamp(
-                50 + (50 - score) * 0.7,
-                50,
-                80
-            )
-        )
-
-    else:
-
-        direction = "震荡"
-        probability = 55
-
-    return (
-        direction,
-        probability,
-        low,
-        center,
-        high
-    )
-
-
-# =========================
-# 公司基本资料
-# =========================
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def get_basic(code):
-
-    try:
-
-        df = ak.stock_individual_info_em(
-            symbol=code
-        )
-
-        if (
-            df is not None
-            and not df.empty
-            and "item" in df.columns
-            and "value" in df.columns
-        ):
-
-            return dict(
-                zip(
-                    df["item"],
-                    df["value"]
-                )
-            )
-
-    except:
-        pass
-
-    return {}
-
-
-# =========================
-# 财务指标
-# =========================
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def get_financial(code):
-
-    result = {
-        "report": "--",
-        "roe": None,
-        "gross": None,
-        "net_margin": None,
-        "debt": None
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_stock_info(code: str) -> dict:
+    code = normalize_code(code)
+
+    out = {
+        "name": code,
+        "industry": "—",
+        "pe": np.nan,
+        "pb": np.nan,
+        "market_cap": np.nan,
     }
 
     try:
+        info = ak.stock_individual_info_em(symbol=code)
 
-        df = (
-            ak.stock_financial_analysis_indicator(
-                symbol=code
+        if info is not None and not info.empty:
+            if {"item", "value"}.issubset(set(info.columns)):
+                kv = dict(zip(info["item"], info["value"]))
+            elif len(info.columns) >= 2:
+                kv = dict(zip(info.iloc[:, 0], info.iloc[:, 1]))
+            else:
+                kv = {}
+
+            out["name"] = str(
+                kv.get("股票简称", kv.get("名称", code))
             )
-        )
 
-        if df is None or df.empty:
-            return result
-
-        if not isinstance(
-            df.index,
-            pd.RangeIndex
-        ):
-            df = df.reset_index()
-
-        row = df.iloc[0].to_dict()
-
-        result["report"] = str(
-            pick(
-                row,
-                [
-                    "日期",
-                    "报告期",
-                    "index"
-                ]
+            out["industry"] = str(
+                kv.get("行业", "—")
             )
-            or "--"
-        )
 
-        result["roe"] = pick(
-            row,
-            [
-                "加权净资产收益率(%)",
-                "摊薄净资产收益率(%)",
-                "净资产收益率(%)"
-            ]
-        )
+            out["pe"] = safe_float(
+                kv.get(
+                    "市盈率-动态",
+                    kv.get("市盈率", np.nan)
+                )
+            )
 
-        result["gross"] = pick(
-            row,
-            [
-                "销售毛利率(%)",
-                "毛利率(%)"
-            ]
-        )
+            out["pb"] = safe_float(
+                kv.get("市净率", np.nan)
+            )
 
-        result["net_margin"] = pick(
-            row,
-            [
-                "销售净利率(%)",
-                "净利率(%)"
-            ]
-        )
+            out["market_cap"] = safe_float(
+                kv.get("总市值", np.nan)
+            )
 
-        result["debt"] = pick(
-            row,
-            ["资产负债率(%)"]
-        )
-
-    except:
+    except Exception:
         pass
 
-    return result
-
-
-# =========================
-# 行业景气
-# =========================
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_industry(name):
-
-    if not name:
-        return None
-
     try:
+        spot = ak.stock_zh_a_spot_em()
+        row = spot[spot["代码"].astype(str) == code]
 
-        end = datetime.now().strftime("%Y%m%d")
+        if not row.empty:
+            r = row.iloc[0]
 
-        start = (
-            datetime.now()
-            - timedelta(days=160)
-        ).strftime("%Y%m%d")
+            out["name"] = str(
+                r.get("名称", out["name"])
+            )
 
-        df = ak.stock_board_industry_hist_em(
-            symbol=name,
-            start_date=start,
-            end_date=end,
-            period="日k",
-            adjust=""
-        )
+            out["pe"] = safe_float(
+                r.get("市盈率-动态", out["pe"])
+            )
 
-        close = pd.to_numeric(
-            df["收盘"],
-            errors="coerce"
-        ).dropna()
+            out["pb"] = safe_float(
+                r.get("市净率", out["pb"])
+            )
 
-        if len(close) < 60:
-            return None
+            out["market_cap"] = safe_float(
+                r.get("总市值", out["market_cap"])
+            )
 
-        ma20 = close.rolling(20).mean().iloc[-1]
-        ma60 = close.rolling(60).mean().iloc[-1]
+    except Exception:
+        pass
 
-        ret20 = (
-            close.iloc[-1]
-            / close.iloc[-21]
-            - 1
-        )
+    return out
 
-        score = 50
 
-        score += 15 if close.iloc[-1] > ma20 else -15
-        score += 15 if ma20 > ma60 else -15
-        score += 15 if ret20 > 0 else -15
+# -----------------------------
+# 技术指标
+# -----------------------------
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
 
-        score = int(clamp(score, 0, 100))
+    for n in [5, 10, 20, 60]:
+        d[f"ma{n}"] = d["close"].rolling(n).mean()
 
-        if score >= 70:
-            label = "🔥 高景气"
+    # MACD
+    d["ema12"] = d["close"].ewm(
+        span=12,
+        adjust=False
+    ).mean()
 
-        elif score >= 55:
-            label = "🟢 景气改善"
+    d["ema26"] = d["close"].ewm(
+        span=26,
+        adjust=False
+    ).mean()
 
-        elif score >= 40:
-            label = "⚪ 中性"
+    d["dif"] = d["ema12"] - d["ema26"]
+
+    d["dea"] = d["dif"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    d["macd"] = 2 * (d["dif"] - d["dea"])
+
+    # RSI
+    delta = d["close"].diff()
+
+    up = delta.clip(lower=0)
+    down = (-delta).clip(lower=0)
+
+    roll_up = up.ewm(
+        alpha=1 / 14,
+        adjust=False
+    ).mean()
+
+    roll_down = down.ewm(
+        alpha=1 / 14,
+        adjust=False
+    ).mean()
+
+    rs = roll_up / roll_down.replace(0, np.nan)
+
+    d["rsi14"] = 100 - (100 / (1 + rs))
+    d["rsi14"] = d["rsi14"].fillna(50)
+
+    # ATR
+    prev_close = d["close"].shift(1)
+
+    tr = pd.concat(
+        [
+            d["high"] - d["low"],
+            (d["high"] - prev_close).abs(),
+            (d["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    d["atr14"] = tr.rolling(14).mean()
+    d["atr_pct"] = d["atr14"] / d["close"]
+
+    # 成交量
+    d["vol_ma5"] = d["volume"].rolling(5).mean()
+    d["vol_ma20"] = d["volume"].rolling(20).mean()
+
+    d["vol_ratio"] = (
+        d["vol_ma5"]
+        / d["vol_ma20"].replace(0, np.nan)
+    )
+
+    # 动量
+    d["ret5"] = d["close"].pct_change(5)
+    d["ret10"] = d["close"].pct_change(10)
+    d["ret20"] = d["close"].pct_change(20)
+    d["ret60"] = d["close"].pct_change(60)
+
+    # 高低点
+    d["high20"] = d["high"].rolling(20).max()
+    d["low20"] = d["low"].rolling(20).min()
+
+    d["high60"] = d["high"].rolling(60).max()
+    d["low60"] = d["low"].rolling(60).min()
+
+    # 偏离均线
+    d["dist_ma20"] = (
+        d["close"] / d["ma20"] - 1
+    )
+
+    d["dist_ma60"] = (
+        d["close"] / d["ma60"] - 1
+    )
+
+    # 上影线比例
+    body_top = d[["open", "close"]].max(axis=1)
+
+    d["upper_shadow_pct"] = (
+        (d["high"] - body_top)
+        .clip(lower=0)
+        / d["close"]
+    )
+
+    # 20日回撤
+    rolling_peak = d["close"].rolling(
+        20,
+        min_periods=1
+    ).max()
+
+    d["dd20"] = (
+        d["close"]
+        / rolling_peak
+        - 1
+    )
+
+    return d
+
+
+# -----------------------------
+# 技术评分
+# -----------------------------
+def technical_score_row(row) -> float:
+    """
+    技术分 0-100
+    """
+
+    score = 50.0
+
+    close = safe_float(row.get("close"))
+    ma5 = safe_float(row.get("ma5"))
+    ma10 = safe_float(row.get("ma10"))
+    ma20 = safe_float(row.get("ma20"))
+    ma60 = safe_float(row.get("ma60"))
+
+    # -------------------------
+    # 1. 均线结构
+    # -------------------------
+    if all(
+        np.isfinite(x)
+        for x in [close, ma5, ma10, ma20]
+    ):
+
+        if close > ma5 > ma10 > ma20:
+            score += 20
+
+        elif close > ma10 > ma20:
+            score += 13
+
+        elif close > ma20:
+            score += 7
+
+        elif close < ma20:
+            score -= 8
+
+    if np.isfinite(ma20) and np.isfinite(ma60):
+
+        if ma20 > ma60:
+            score += 8
 
         else:
-            label = "🔵 景气偏弱"
+            score -= 4
 
-        return {
-            "score": score,
-            "label": label,
-            "ret20": ret20 * 100
-        }
+    # -------------------------
+    # 2. MACD
+    # -------------------------
+    dif = safe_float(row.get("dif"))
+    dea = safe_float(row.get("dea"))
+    macd = safe_float(row.get("macd"))
 
-    except:
-        return None
+    if np.isfinite(dif) and np.isfinite(dea):
 
+        if dif > dea:
+            score += 8
+        else:
+            score -= 6
 
-# =========================
-# 资金流
-# =========================
+    if np.isfinite(macd):
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_flow(code):
+        if macd > 0:
+            score += 4
+        else:
+            score -= 3
 
-    try:
+    # -------------------------
+    # 3. RSI
+    # -------------------------
+    rsi = safe_float(
+        row.get("rsi14"),
+        50
+    )
 
-        df = ak.stock_individual_fund_flow(
-            stock=code,
-            market=prefix(code)
+    if 55 <= rsi <= 72:
+        score += 10
+
+    elif 50 <= rsi < 55:
+        score += 5
+
+    elif 72 < rsi <= 80:
+        score += 2
+
+    elif rsi > 80:
+        score -= 8
+
+    elif rsi < 40:
+        score -= 8
+
+    # -------------------------
+    # 4. 动量
+    # -------------------------
+    ret5 = safe_float(
+        row.get("ret5"),
+        0
+    )
+
+    ret20 = safe_float(
+        row.get("ret20"),
+        0
+    )
+
+    if ret5 > 0:
+        score += min(
+            ret5 * 100 * 1.2,
+            6
         )
 
-        if df is None or df.empty:
-            return None
+    else:
+        score += max(
+            ret5 * 100,
+            -6
+        )
 
-        row = df.iloc[-1].to_dict()
+    if ret20 > 0:
+        score += min(
+            ret20 * 100 * 0.7,
+            8
+        )
 
-        return {
-            "main": pick(
-                row,
-                [
-                    "主力净流入-净额",
-                    "主力净流入净额"
-                ]
+    else:
+        score += max(
+            ret20 * 100 * 0.6,
+            -8
+        )
+
+    # -------------------------
+    # 5. 量价
+    # -------------------------
+    vr = safe_float(
+        row.get("vol_ratio"),
+        1.0
+    )
+
+    if 1.0 <= vr <= 1.8 and ret5 > 0:
+
+        score += 6
+
+    elif vr > 2.5:
+
+        score -= 3
+
+    # -------------------------
+    # 6. 过热惩罚
+    # -------------------------
+    dist20 = safe_float(
+        row.get("dist_ma20"),
+        0
+    )
+
+    if dist20 > 0.18:
+
+        score -= 15
+
+    elif dist20 > 0.12:
+
+        score -= 8
+
+    elif dist20 > 0.08:
+
+        score -= 3
+
+    # -------------------------
+    # 7. 上影线惩罚
+    # -------------------------
+    upper = safe_float(
+        row.get("upper_shadow_pct"),
+        0
+    )
+
+    if upper > 0.06:
+
+        score -= 8
+
+    elif upper > 0.04:
+
+        score -= 4
+
+    # -------------------------
+    # 8. 回撤惩罚
+    # -------------------------
+    dd20 = safe_float(
+        row.get("dd20"),
+        0
+    )
+
+    if dd20 < -0.12:
+
+        score -= 10
+
+    elif dd20 < -0.08:
+
+        score -= 6
+
+    elif dd20 < -0.04:
+
+        score -= 3
+
+    return clamp(
+        round(score, 1)
+    )
+
+
+# -----------------------------
+# 构建趋势变化
+# -----------------------------
+def build_score_history(
+    df: pd.DataFrame
+) -> pd.DataFrame:
+
+    d = add_indicators(df)
+
+    d["tech_score"] = d.apply(
+        technical_score_row,
+        axis=1
+    )
+
+    # 平滑分
+    d["score_smooth"] = (
+        d["tech_score"]
+        .ewm(
+            span=3,
+            adjust=False
+        )
+        .mean()
+        .round(1)
+    )
+
+    # -------------------------
+    # ΔScore
+    # -------------------------
+    d["delta1"] = (
+        d["score_smooth"]
+        .diff(1)
+    )
+
+    d["delta3"] = (
+        d["score_smooth"]
+        .diff(3)
+    )
+
+    d["delta5"] = (
+        d["score_smooth"]
+        .diff(5)
+    )
+
+    # 趋势速度
+    d["velocity"] = d["delta3"]
+
+    # -------------------------
+    # 趋势加速度
+    # -------------------------
+    prev_velocity = (
+        d["score_smooth"].shift(3)
+        - d["score_smooth"].shift(6)
+    )
+
+    d["acceleration"] = (
+        d["velocity"]
+        - prev_velocity
+    )
+
+    return d
+
+
+# -----------------------------
+# 状态机
+# -----------------------------
+def get_state(
+    score: float,
+    row: pd.Series
+) -> str:
+
+    close = safe_float(
+        row.get("close")
+    )
+
+    ma20 = safe_float(
+        row.get("ma20")
+    )
+
+    dif = safe_float(
+        row.get("dif")
+    )
+
+    dea = safe_float(
+        row.get("dea")
+    )
+
+    above20 = (
+        np.isfinite(close)
+        and np.isfinite(ma20)
+        and close >= ma20
+    )
+
+    macd_ok = (
+        np.isfinite(dif)
+        and np.isfinite(dea)
+        and dif >= dea
+    )
+
+    if (
+        score >= 85
+        and above20
+        and macd_ok
+    ):
+        return "趋势强化"
+
+    if (
+        score >= 60
+        and above20
+    ):
+        return "趋势形成"
+
+    if score >= 40:
+        return "震荡观察"
+
+    return "风险释放"
+
+
+# -----------------------------
+# 趋势变化状态
+# -----------------------------
+def trend_change_label(
+    delta3: float,
+    acceleration: float,
+    score: float
+):
+
+    d3 = (
+        0
+        if not np.isfinite(delta3)
+        else float(delta3)
+    )
+
+    acc = (
+        0
+        if not np.isfinite(acceleration)
+        else float(acceleration)
+    )
+
+    if (
+        d3 >= 12
+        and acc >= 4
+    ):
+        return (
+            "🚀 加速强化",
+            "技术分连续抬升，且上涨速度继续增加"
+        )
+
+    if d3 >= 6:
+
+        return (
+            "📈 趋势增强",
+            "技术分持续上升，正反馈正在加强"
+        )
+
+    if d3 >= 2:
+
+        return (
+            "↗ 温和改善",
+            "技术状态改善，但加速度不强"
+        )
+
+    if (
+        d3 <= -12
+        and acc <= -4
+    ):
+
+        return (
+            "🔻 加速转弱",
+            "技术分下滑且下降速度扩大"
+        )
+
+    if d3 <= -6:
+
+        return (
+            "📉 趋势减速",
+            "技术分明显回落，原趋势正在削弱"
+        )
+
+    if d3 <= -2:
+
+        return (
+            "↘ 小幅转弱",
+            "技术分轻度下降，需观察是否继续恶化"
+        )
+
+    return (
+        "➡️ 趋势平稳",
+        "近3日技术分变化较小"
+    )
+
+
+# -----------------------------
+# 风险等级
+# -----------------------------
+def risk_level(row: pd.Series):
+
+    risk = 0.0
+
+    atrp = safe_float(
+        row.get("atr_pct"),
+        0
+    )
+
+    rsi = safe_float(
+        row.get("rsi14"),
+        50
+    )
+
+    dist20 = abs(
+        safe_float(
+            row.get("dist_ma20"),
+            0
+        )
+    )
+
+    dd20 = abs(
+        min(
+            0,
+            safe_float(
+                row.get("dd20"),
+                0
+            )
+        )
+    )
+
+    upper = safe_float(
+        row.get("upper_shadow_pct"),
+        0
+    )
+
+    risk += min(
+        atrp / 0.05 * 25,
+        25
+    )
+
+    risk += min(
+        dist20 / 0.15 * 25,
+        25
+    )
+
+    risk += min(
+        dd20 / 0.12 * 30,
+        30
+    )
+
+    risk += min(
+        upper / 0.06 * 10,
+        10
+    )
+
+    if rsi > 80:
+        risk += 10
+
+    elif rsi < 35:
+        risk += 8
+
+    risk = clamp(risk)
+
+    if risk < 38:
+        return "低", risk
+
+    if risk < 66:
+        return "中", risk
+
+    return "高", risk
+
+
+# -----------------------------
+# 5 / 20 / 60日情景
+# -----------------------------
+def forecast_scenarios(
+    df: pd.DataFrame,
+    current_score: float
+):
+
+    d = df.copy()
+
+    close = float(
+        d["close"].iloc[-1]
+    )
+
+    daily_ret = (
+        d["close"]
+        .pct_change()
+        .dropna()
+    )
+
+    vol = (
+        daily_ret
+        .tail(60)
+        .std()
+    )
+
+    if (
+        not np.isfinite(vol)
+        or vol <= 0
+    ):
+        vol = 0.02
+
+    trend_bias = (
+        current_score - 50
+    ) / 50.0
+
+    mom20 = safe_float(
+        d["close"]
+        .pct_change(20)
+        .iloc[-1],
+        0
+    )
+
+    rows = []
+
+    for horizon in [
+        5,
+        20,
+        60
+    ]:
+
+        drift = np.clip(
+            0.35
+            * mom20
+            * (horizon / 20)
+            + 0.025
+            * trend_bias
+            * math.sqrt(
+                horizon / 20
             ),
-            "ratio": pick(
-                row,
-                [
-                    "主力净流入-净占比",
-                    "主力净流入净占比"
-                ]
-            )
-        }
-
-    except:
-        return None
-
-
-# =========================
-# 公告
-# =========================
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_notices(code):
-
-    positive_words = [
-        "中标",
-        "合同",
-        "订单",
-        "回购",
-        "增持",
-        "预增",
-        "扭亏",
-        "重大项目",
-        "战略合作",
-        "获批"
-    ]
-
-    negative_words = [
-        "减持",
-        "亏损",
-        "处罚",
-        "立案",
-        "风险提示",
-        "诉讼",
-        "终止",
-        "下修",
-        "预亏",
-        "退市"
-    ]
-
-    try:
-
-        df = ak.stock_individual_notice_report(
-            symbol=code
+            -0.22,
+            0.30,
         )
 
-        result = []
-
-        for _, row in df.head(40).iterrows():
-
-            title = str(
-                row.get(
-                    "公告标题",
-                    ""
-                )
-            )
-
-            date = str(
-                row.get(
-                    "公告日期",
-                    ""
-                )
-            )[:10]
-
-            positive = any(
-                word in title
-                for word in positive_words
-            )
-
-            negative = any(
-                word in title
-                for word in negative_words
-            )
-
-            if not positive and not negative:
-                continue
-
-            if positive and not negative:
-                kind = "🟢 潜在正反馈"
-
-            elif negative and not positive:
-                kind = "🔴 潜在风险"
-
-            else:
-                kind = "🟡 需判断"
-
-            result.append(
-                {
-                    "date": date,
-                    "type": kind,
-                    "title": title
-                }
-            )
-
-        return result[:8]
-
-    except:
-        return []
-
-
-# =========================
-# 市场温度
-# =========================
-
-@st.cache_data(ttl=600, show_spinner=False)
-def get_temperature():
-
-    try:
-
-        df = ak.stock_zh_a_spot_em()
-
-        pct = pd.to_numeric(
-            df["涨跌幅"],
-            errors="coerce"
-        ).dropna()
-
-        if len(pct) < 500:
-            raise ValueError("样本不足")
-
-        up = int((pct > 0).sum())
-        down = int((pct < 0).sum())
-
-        breadth = (
-            (up - down)
-            / len(pct)
-            * 100
+        sigma = (
+            vol
+            * math.sqrt(horizon)
         )
 
-        strong = (
-            (
-                (pct >= 5).sum()
-                -
-                (pct <= -5).sum()
-            )
-            / len(pct)
-            * 100
-        )
-
-        extreme = clamp(
-            (
-                (pct >= 9.5).sum()
-                -
-                (pct <= -9.5).sum()
-            ) * 2,
-            -100,
-            100
-        )
-
-        temp = (
-            breadth * 0.40
-            +
-            clamp(
-                pct.median() * 25,
-                -100,
-                100
-            ) * 0.25
-            +
-            clamp(
-                pct.mean() * 20,
-                -100,
-                100
-            ) * 0.15
-            +
-            extreme * 0.10
-            +
-            clamp(
-                strong * 8,
-                -100,
-                100
-            ) * 0.10
-        )
-
-        temp = int(
-            round(
-                clamp(
-                    temp,
-                    -100,
-                    100
-                )
+        low = (
+            close
+            * (
+                1
+                + drift
+                - 0.80 * sigma
             )
         )
 
-        if temp <= -80:
-            label = "🥶 极度恐慌"
-
-        elif temp <= -50:
-            label = "❄️ 恐慌"
-
-        elif temp <= -20:
-            label = "🔵 偏冷"
-
-        elif temp < 20:
-            label = "⚪ 平衡"
-
-        elif temp < 50:
-            label = "🟡 回暖"
-
-        elif temp < 80:
-            label = "🔥 火热"
-
-        else:
-            label = "🌋 过热"
-
-        return {
-            "temp": temp,
-            "label": label,
-            "up": up,
-            "down": down
-        }
-
-    except:
-        return {
-            "temp": None,
-            "label": "数据暂缺"
-        }
-
-
-# =========================
-# 个股页面
-# =========================
-
-def stock_page():
-
-    code = st.text_input(
-        "股票代码",
-        placeholder="例如 000977",
-        max_chars=6
-    ).strip()
-
-    analyse_button = st.button(
-        "⚡ 开始快速分析",
-        type="primary",
-        use_container_width=True
-    )
-
-    if analyse_button:
-
-        if len(code) != 6 or not code.isdigit():
-
-            st.error(
-                "请输入6位股票代码"
+        high = (
+            close
+            * (
+                1
+                + drift
+                + 0.80 * sigma
             )
+        )
+
+        mid = (
+            close
+            * (
+                1
+                + drift
+            )
+        )
+
+        prob_up = clamp(
+            50
+            + trend_bias * 25
+            + np.clip(
+                mom20 * 100,
+                -15,
+                15
+            ) * 0.8,
+            20,
+            80,
+        )
+
+        if prob_up >= 58:
+
+            scene = "偏强"
+
+        elif prob_up <= 42:
+
+            scene = "偏弱"
 
         else:
 
-            try:
+            scene = "震荡"
 
-                with st.spinner(
-                    "正在读取行情..."
-                ):
-
-                    df = get_prices(code)
-
-                    (
-                        df,
-                        score,
-                        state,
-                        risk,
-                        atr
-                    ) = technical_engine(df)
-
-                st.session_state["fast"] = {
-                    "code": code,
-                    "df": df,
-                    "score": score,
-                    "state": state,
-                    "risk": risk,
-                    "atr": atr
-                }
-
-            except Exception as error:
-
-                st.error(
-                    f"行情获取失败：{error}"
-                )
-
-    result = st.session_state.get("fast")
-
-    if not result:
-        return
-
-    if result["code"] != code:
-        return
-
-    df = result["df"]
-    row = df.iloc[-1]
-
-    basic = get_basic(code)
-
-    stock_name = (
-        pick(
-            basic,
-            [
-                "股票简称",
-                "名称"
-            ]
-        )
-        or code
-    )
-
-    st.success(
-        "⚡ 快速分析完成"
-    )
-
-    st.header(
-        f"{stock_name} · {code}"
-    )
-
-    st.caption(
-        f"行情日期："
-        f"{row['date'].strftime('%Y-%m-%d')}"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "技术分",
-        result["score"]
-    )
-
-    col2.metric(
-        "状态",
-        result["state"]
-    )
-
-    col3.metric(
-        "风险",
-        result["risk"]
-    )
-
-    st.metric(
-        "最新收盘",
-        f"{row['close']:.2f}"
-    )
-
-    ret20 = (
-        float(row["RET20"])
-        if pd.notna(row["RET20"])
-        else 0
-    )
-
-    ret60 = (
-        float(row["RET60"])
-        if pd.notna(row["RET60"])
-        else 0
-    )
-
-    st.subheader(
-        "🔮 5 / 20 / 60日概率情景"
-    )
-
-    forecast_rows = []
-
-    for days in [5, 20, 60]:
-
-        (
-            direction,
-            probability,
-            low,
-            center,
-            high
-        ) = forecast(
-            float(row["close"]),
-            result["score"],
-            result["atr"],
-            ret20,
-            ret60,
-            days
-        )
-
-        forecast_rows.append(
+        rows.append(
             {
-                "周期": f"{days}日",
-                "情景": direction,
-                "概率": f"{probability}%",
-                "中枢": round(center, 2),
-                "参考区间":
+                "周期": f"{horizon}日",
+                "情景": scene,
+                "概率": f"{prob_up:.0f}%",
+                "中枢": round(
+                    mid,
+                    2
+                ),
+                "参考区间": (
                     f"{low:.2f}～{high:.2f}"
+                ),
             }
         )
 
-    st.dataframe(
-        pd.DataFrame(forecast_rows),
-        hide_index=True,
-        use_container_width=True
-    )
+    return pd.DataFrame(rows)
 
-    support = df["low"].tail(20).min()
-    resistance = df["high"].tail(20).max()
 
-    col1, col2 = st.columns(2)
+# -----------------------------
+# 趋势温度计
+# -----------------------------
+def stock_temperature(
+    score,
+    delta3,
+    risk_score
+):
 
-    col1.metric(
-        "20日支撑",
-        f"{support:.2f}"
-    )
+    base = (
+        score - 50
+    ) * 1.35
 
-    col2.metric(
-        "20日压力",
-        f"{resistance:.2f}"
-    )
-
-    with st.expander(
-        "📊 技术趋势"
-    ):
-
-        st.line_chart(
-            df[
-                [
-                    "date",
-                    "close",
-                    "MA20",
-                    "MA60"
-                ]
-            ]
-            .tail(120)
-            .set_index("date")
+    delta = (
+        np.clip(
+            delta3
+            if np.isfinite(delta3)
+            else 0,
+            -20,
+            20
         )
+        * 1.2
+    )
 
-        if pd.notna(row["RSI"]):
-            st.write(
-                f"RSI14：{row['RSI']:.1f}"
+    risk_penalty = (
+        max(
+            0,
+            risk_score - 50
+        )
+        * 0.5
+    )
+
+    temp = int(
+        round(
+            np.clip(
+                base
+                + delta
+                - risk_penalty,
+                -100,
+                100
             )
-
-        st.write(
-            f"ATR波动率："
-            f"{result['atr'] * 100:.2f}%"
         )
-
-        st.write(
-            f"20日涨跌："
-            f"{ret20 * 100:+.2f}%"
-        )
-
-        st.write(
-            f"60日涨跌："
-            f"{ret60 * 100:+.2f}%"
-        )
-
-    st.divider()
-
-    st.subheader(
-        "🧩 深度数据"
     )
 
-    st.caption(
-        "以下数据按需加载，不拖慢首屏。"
-    )
+    if temp >= 75:
 
-    # 基本面
-    if st.button(
-        "🏢 加载基本面 / 估值",
-        use_container_width=True
-    ):
+        label = "极热 / 强趋势"
+
+    elif temp >= 45:
+
+        label = "活跃 / 偏强"
+
+    elif temp >= 15:
+
+        label = "温和偏强"
+
+    elif temp > -15:
+
+        label = "中性"
+
+    elif temp > -45:
+
+        label = "偏冷 / 偏弱"
+
+    elif temp > -75:
+
+        label = "低迷 / 弱势"
+
+    else:
+
+        label = "极冷 / 风险释放"
+
+    return temp, label
+
+
+# -----------------------------
+# 页面
+# -----------------------------
+st.title(
+    "📈 A股工程控制论 V1.1"
+)
+
+st.caption(
+    "新增：趋势变化 ΔScore + 趋势速度 + 趋势加速度。"
+    "核心不是只看“现在多少分”，而是看分数正在向哪个方向变化。"
+)
+
+code = st.text_input(
+    "股票代码",
+    value="002332",
+    max_chars=12
+)
+
+analyze = st.button(
+    "⚡ 开始快速分析",
+    type="primary",
+    use_container_width=True
+)
+
+
+if analyze or code:
+
+    code = normalize_code(code)
+
+    try:
 
         with st.spinner(
-            "读取财务数据..."
+            "正在获取行情并运行工程控制模型..."
         ):
 
-            financial = get_financial(code)
-
-        st.session_state["financial"] = {
-            "code": code,
-            "data": financial
-        }
-
-    financial_result = (
-        st.session_state.get(
-            "financial"
-        )
-    )
-
-    if (
-        financial_result
-        and financial_result["code"] == code
-    ):
-
-        f = financial_result["data"]
-
-        st.markdown(
-            "### 🏢 基本面 / 估值"
-        )
-
-        pe = pick(
-            basic,
-            [
-                "市盈率(TTM)",
-                "市盈率-动态"
-            ]
-        )
-
-        pb = pick(
-            basic,
-            ["市净率"]
-        )
-
-        market_cap = pick(
-            basic,
-            ["总市值"]
-        )
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "PE",
-            pe if pe is not None else "--"
-        )
-
-        col2.metric(
-            "PB",
-            pb if pb is not None else "--"
-        )
-
-        st.write(
-            "总市值：",
-            money(market_cap)
-        )
-
-        st.caption(
-            "财务报告期："
-            +
-            str(f["report"])
-        )
-
-        roe = num(f["roe"])
-        gross = num(f["gross"])
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "ROE",
-            "--"
-            if pd.isna(roe)
-            else f"{roe:.2f}%"
-        )
-
-        col2.metric(
-            "毛利率",
-            "--"
-            if pd.isna(gross)
-            else f"{gross:.2f}%"
-        )
-
-        net_margin = num(
-            f["net_margin"]
-        )
-
-        debt = num(
-            f["debt"]
-        )
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "净利率",
-            "--"
-            if pd.isna(net_margin)
-            else f"{net_margin:.2f}%"
-        )
-
-        col2.metric(
-            "资产负债率",
-            "--"
-            if pd.isna(debt)
-            else f"{debt:.2f}%"
-        )
-
-    # 行业
-    if st.button(
-        "🏭 加载行业景气",
-        use_container_width=True
-    ):
-
-        industry_name = pick(
-            basic,
-            [
-                "行业",
-                "所属行业"
-            ]
-        )
-
-        with st.spinner(
-            "读取行业数据..."
-        ):
-
-            industry = get_industry(
-                industry_name
+            hist_raw = get_hist(
+                code,
+                280
             )
 
-        st.session_state["industry"] = {
-            "code": code,
-            "name": industry_name,
-            "data": industry
-        }
-
-    industry_result = (
-        st.session_state.get(
-            "industry"
-        )
-    )
-
-    if (
-        industry_result
-        and industry_result["code"] == code
-    ):
-
-        st.markdown(
-            "### 🏭 行业景气"
-        )
-
-        st.write(
-            "所属行业：",
-            industry_result["name"]
-            or "--"
-        )
-
-        industry = (
-            industry_result["data"]
-        )
-
-        if industry:
-
-            col1, col2 = st.columns(2)
-
-            col1.metric(
-                "景气分",
-                industry["score"]
+            d = build_score_history(
+                hist_raw
             )
 
-            col2.metric(
-                "状态",
-                industry["label"]
-            )
-
-            st.write(
-                f"行业20日走势："
-                f"{industry['ret20']:+.2f}%"
-            )
-
-        else:
-
-            st.info(
-                "本次行业数据暂缺。"
-            )
-
-    # 资金
-    if st.button(
-        "💵 加载资金流",
-        use_container_width=True
-    ):
-
-        with st.spinner(
-            "读取资金数据..."
-        ):
-
-            flow = get_flow(code)
-
-        st.session_state["flow"] = {
-            "code": code,
-            "data": flow
-        }
-
-    flow_result = (
-        st.session_state.get("flow")
-    )
-
-    if (
-        flow_result
-        and flow_result["code"] == code
-    ):
-
-        st.markdown(
-            "### 💵 资金流"
-        )
-
-        flow = flow_result["data"]
-
-        if flow:
-
-            col1, col2 = st.columns(2)
-
-            col1.metric(
-                "主力净流入",
-                money(flow["main"])
-            )
-
-            col2.metric(
-                "主力净占比",
-                flow["ratio"]
-                if flow["ratio"] is not None
-                else "--"
-            )
-
-        else:
-
-            st.info(
-                "本次资金流数据暂缺。"
-            )
-
-    # 公告
-    if st.button(
-        "📦 加载订单 / 公告",
-        use_container_width=True
-    ):
-
-        with st.spinner(
-            "读取近期公告..."
-        ):
-
-            notice_data = get_notices(
+            info = get_stock_info(
                 code
             )
 
-        st.session_state["notices"] = {
-            "code": code,
-            "data": notice_data
-        }
+        if len(d) < 65:
 
-    notice_result = (
-        st.session_state.get(
-            "notices"
-        )
-    )
-
-    if (
-        notice_result
-        and notice_result["code"] == code
-    ):
-
-        st.markdown(
-            "### 📦 订单 · 催化 · 风险"
-        )
-
-        notice_data = (
-            notice_result["data"]
-        )
-
-        if not notice_data:
-
-            st.info(
-                "近期未识别到相关公告。"
-                "这不代表公司不存在相关事项。"
+            st.warning(
+                "历史数据不足65个交易日，部分指标可能不完整。"
             )
 
-        for notice in notice_data:
+        latest = d.iloc[-1]
 
-            with st.container(
-                border=True
-            ):
+        current_score = float(
+            latest["score_smooth"]
+        )
 
-                st.write(
-                    f"**{notice['type']}**"
-                )
+        delta1 = safe_float(
+            latest.get("delta1"),
+            0
+        )
 
-                st.write(
-                    notice["title"]
-                )
+        delta3 = safe_float(
+            latest.get("delta3"),
+            0
+        )
 
-                st.caption(
-                    notice["date"]
-                    +
-                    " ｜ 公司公开公告"
-                )
+        delta5 = safe_float(
+            latest.get("delta5"),
+            0
+        )
+
+        acceleration = safe_float(
+            latest.get("acceleration"),
+            0
+        )
+
+        state = get_state(
+            current_score,
+            latest
+        )
+
+        risk_text, risk_score = (
+            risk_level(latest)
+        )
+
+        trend_label, trend_desc = (
+            trend_change_label(
+                delta3,
+                acceleration,
+                current_score
+            )
+        )
+
+        temp, temp_label = (
+            stock_temperature(
+                current_score,
+                delta3,
+                risk_score
+            )
+        )
+
+        name = info.get(
+            "name",
+            code
+        )
+
+        date_text = (
+            pd.to_datetime(
+                latest["date"]
+            )
+            .strftime(
+                "%Y-%m-%d"
+            )
+        )
+
+        st.success(
+            "⚡ 快速分析完成"
+        )
+
+        st.markdown(
+            f"## {name} · {code}"
+        )
 
         st.caption(
-            "公告只进行关键词初筛，"
-            "不自动认定为确定性利好或利空。"
+            f"行情日期：{date_text}"
         )
 
-
-# =========================
-# 温度页面
-# =========================
-
-def temperature_page():
-
-    st.subheader(
-        "🌡️ 市场温度计"
-    )
-
-    st.caption(
-        "-100℃ ～ +100℃"
-    )
-
-    if st.button(
-        "🌡️ 测量市场温度",
-        type="primary",
-        use_container_width=True
-    ):
-
-        with st.spinner(
-            "正在扫描全A..."
-        ):
-
-            result = get_temperature()
-
-        st.session_state["temperature"] = result
-
-    result = (
-        st.session_state.get(
-            "temperature"
+        # -------------------------
+        # 顶部核心指标
+        # -------------------------
+        c1, c2, c3, c4 = (
+            st.columns(4)
         )
-    )
 
-    if not result:
+        c1.metric(
+            "技术分",
+            f"{current_score:.0f}",
+            f"{delta1:+.1f} / 1日"
+        )
+
+        c2.metric(
+            "状态",
+            state
+        )
+
+        c3.metric(
+            "风险",
+            risk_text,
+            f"风险分 {risk_score:.0f}"
+        )
+
+        c4.metric(
+            "最新收盘",
+            f"{latest['close']:.2f}"
+        )
+
+        st.divider()
+
+        # -------------------------
+        # 趋势变化
+        # -------------------------
+        st.subheader(
+            "🚦 趋势变化 / ΔScore"
+        )
+
+        a1, a2, a3, a4 = (
+            st.columns(4)
+        )
+
+        a1.metric(
+            "1日 ΔScore",
+            f"{delta1:+.1f}"
+        )
+
+        a2.metric(
+            "3日 ΔScore",
+            f"{delta3:+.1f}"
+        )
+
+        a3.metric(
+            "5日 ΔScore",
+            f"{delta5:+.1f}"
+        )
+
+        a4.metric(
+            "趋势加速度",
+            f"{acceleration:+.1f}"
+        )
 
         st.info(
-            "温度计按需运行，"
-            "因此不会拖慢个股分析。"
+            f"**{trend_label}** ｜ {trend_desc}"
         )
 
-        return
+        # -------------------------
+        # 自动解释
+        # -------------------------
+        if (
+            current_score >= 85
+            and delta3 > 0
+        ):
 
-    if result["temp"] is None:
+            st.write(
+                "当前属于："
+                "**高分 + 趋势继续增强**。"
+                "趋势本身强，且控制力仍在提高。"
+            )
+
+        elif (
+            current_score >= 85
+            and delta3 < -5
+        ):
+
+            st.write(
+                "当前属于："
+                "**高分但开始减速**。"
+                "绝对分数仍高，但边际趋势已经转弱，"
+                "需要防止“高分见顶”。"
+            )
+
+        elif (
+            60 <= current_score < 85
+            and delta3 >= 6
+        ):
+
+            st.write(
+                "当前属于："
+                "**趋势形成并快速改善**。"
+                "这是模型重点观察的由弱转强阶段。"
+            )
+
+        elif (
+            current_score < 40
+            and delta3 >= 6
+        ):
+
+            st.write(
+                "当前属于："
+                "**风险释放后的修复早期**。"
+                "分数仍低，但趋势方向已经开始改善。"
+            )
+
+        elif (
+            current_score < 40
+            and delta3 <= 0
+        ):
+
+            st.write(
+                "当前属于："
+                "**风险释放且尚未出现明显修复**。"
+            )
+
+        else:
+
+            st.write(
+                "当前趋势变化处于中间状态，"
+                "重点观察未来2～5个交易日ΔScore是否持续同方向。"
+            )
+
+        # -------------------------
+        # 技术分轨迹
+        # -------------------------
+        chart_df = (
+            d[
+                [
+                    "date",
+                    "score_smooth"
+                ]
+            ]
+            .tail(30)
+            .set_index("date")
+        )
+
+        st.subheader(
+            "📉 近30个交易日技术分轨迹"
+        )
+
+        st.line_chart(
+            chart_df,
+            height=260
+        )
+
+        st.caption(
+            "判读重点：不是100分一定更好，"
+            "而是观察60→70→80→90的持续抬升，"
+            "以及100→95→88这类减速信号。"
+        )
+
+        # -------------------------
+        # 温度计
+        # -------------------------
+        st.subheader(
+            "🌡️ 个股趋势温度计"
+        )
 
         st.metric(
-            "市场温度",
-            "--℃"
+            "温度",
+            f"{temp} ℃",
+            temp_label
+        )
+
+        st.progress(
+            int(
+                (temp + 100) / 2
+            )
+        )
+
+        st.markdown(
+            """
+**温度解释：**
+
+- +75～+100：极热 / 强趋势
+- +45～+74：活跃 / 偏强
+- +15～+44：温和偏强
+- -14～+14：中性
+- -44～-15：偏冷 / 偏弱
+- -74～-45：低迷 / 弱势
+- -100～-75：极冷 / 风险释放
+            """
+        )
+
+        # -------------------------
+        # 技术结构
+        # -------------------------
+        st.subheader(
+            "🧭 技术结构"
+        )
+
+        t1, t2, t3, t4 = (
+            st.columns(4)
+        )
+
+        t1.metric(
+            "MA5",
+            fmt_num(
+                latest.get("ma5")
+            )
+        )
+
+        t2.metric(
+            "MA10",
+            fmt_num(
+                latest.get("ma10")
+            )
+        )
+
+        t3.metric(
+            "MA20",
+            fmt_num(
+                latest.get("ma20")
+            )
+        )
+
+        t4.metric(
+            "MA60",
+            fmt_num(
+                latest.get("ma60")
+            )
+        )
+
+        t5, t6, t7, t8 = (
+            st.columns(4)
+        )
+
+        t5.metric(
+            "RSI14",
+            fmt_num(
+                latest.get("rsi14"),
+                1
+            )
+        )
+
+        t6.metric(
+            "MACD",
+            fmt_num(
+                latest.get("macd"),
+                3
+            )
+        )
+
+        t7.metric(
+            "20日涨跌",
+            pct(
+                latest.get("ret20")
+            )
+        )
+
+        t8.metric(
+            "量比(5/20)",
+            fmt_num(
+                latest.get("vol_ratio"),
+                2
+            )
+        )
+
+        # -------------------------
+        # 概率情景
+        # -------------------------
+        st.subheader(
+            "🔮 5 / 20 / 60日概率情景"
+        )
+
+        scenario_df = (
+            forecast_scenarios(
+                d,
+                current_score
+            )
+        )
+
+        st.dataframe(
+            scenario_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # -------------------------
+        # 基本信息
+        # -------------------------
+        st.subheader(
+            "🏢 基本信息"
+        )
+
+        f1, f2, f3, f4 = (
+            st.columns(4)
+        )
+
+        f1.metric(
+            "行业",
+            str(
+                info.get(
+                    "industry",
+                    "—"
+                )
+            )
+        )
+
+        f2.metric(
+            "PE",
+            fmt_num(
+                info.get("pe")
+            )
+        )
+
+        f3.metric(
+            "PB",
+            fmt_num(
+                info.get("pb")
+            )
+        )
+
+        mc = info.get(
+            "market_cap",
+            np.nan
+        )
+
+        if np.isfinite(mc):
+
+            if mc > 1e7:
+
+                mc_text = (
+                    f"{mc / 1e8:.1f} 亿"
+                )
+
+            else:
+
+                mc_text = fmt_num(mc)
+
+        else:
+
+            mc_text = "—"
+
+        f4.metric(
+            "总市值",
+            mc_text
+        )
+
+        # -------------------------
+        # 状态机说明
+        # -------------------------
+        st.subheader(
+            "🧠 工程控制论状态机"
+        )
+
+        state_df = pd.DataFrame(
+            [
+                [
+                    "趋势强化",
+                    "高技术分 + 多头结构 + 动量确认",
+                    "趋势已建立并强化"
+                ],
+                [
+                    "趋势形成",
+                    "技术分进入中高区 + 站上中期均线",
+                    "正反馈正在建立"
+                ],
+                [
+                    "震荡观察",
+                    "多空信号混合",
+                    "等待控制方向确认"
+                ],
+                [
+                    "风险释放",
+                    "技术分低 / 中期结构偏弱",
+                    "负反馈占优，先释放风险"
+                ],
+            ],
+            columns=[
+                "状态",
+                "典型形式",
+                "系统含义"
+            ]
+        )
+
+        st.dataframe(
+            state_df,
+            hide_index=True,
+            use_container_width=True
+        )
+
+        # -------------------------
+        # 趋势变化规则
+        # -------------------------
+        st.subheader(
+            "⚙️ 趋势变化规则"
+        )
+
+        delta_rules = pd.DataFrame(
+            [
+                [
+                    "🚀 加速强化",
+                    "3日ΔScore ≥ +12 且加速度 ≥ +4",
+                    "趋势和趋势速度同时增强"
+                ],
+                [
+                    "📈 趋势增强",
+                    "3日ΔScore ≥ +6",
+                    "正反馈增强"
+                ],
+                [
+                    "↗ 温和改善",
+                    "3日ΔScore ≥ +2",
+                    "状态边际改善"
+                ],
+                [
+                    "➡️ 趋势平稳",
+                    "-2 < 3日ΔScore < +2",
+                    "变化不明显"
+                ],
+                [
+                    "↘ 小幅转弱",
+                    "3日ΔScore ≤ -2",
+                    "出现边际走弱"
+                ],
+                [
+                    "📉 趋势减速",
+                    "3日ΔScore ≤ -6",
+                    "原趋势明显削弱"
+                ],
+                [
+                    "🔻 加速转弱",
+                    "3日ΔScore ≤ -12 且加速度 ≤ -4",
+                    "下降速度扩大"
+                ],
+            ],
+            columns=[
+                "趋势变化",
+                "触发条件",
+                "含义"
+            ]
+        )
+
+        st.dataframe(
+            delta_rules,
+            hide_index=True,
+            use_container_width=True
         )
 
         st.warning(
-            "当前全A数据接口暂时不可用。"
+            "说明：技术分、趋势变化和5/20/60日情景"
+            "属于量化研究模型输出，不等于确定性涨跌预测。"
+            "建议重点验证状态转换和ΔScore方向"
+            "是否与实际K线演化一致。"
         )
 
-        return
+    except Exception as e:
 
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "市场温度",
-        f"{result['temp']:+d}℃"
-    )
-
-    col2.metric(
-        "市场情绪",
-        result["label"]
-    )
-
-    st.progress(
-        int(
-            (result["temp"] + 100)
-            / 2
+        st.error(
+            f"分析失败：{e}"
         )
-    )
 
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "上涨股票",
-        result["up"]
-    )
-
-    col2.metric(
-        "下跌股票",
-        result["down"]
-    )
-
-    st.caption(
-        "高温不代表一定继续上涨；"
-        "低温也不代表立即见底。"
-    )
-
-
-# =========================
-# 导航
-# =========================
-
-page = st.selectbox(
-    "功能",
-    [
-        "🔎 个股分析",
-        "🌡️ 市场温度计",
-        "⚙️ 模型说明"
-    ]
-)
-
-st.divider()
-
-if page == "🔎 个股分析":
-
-    stock_page()
-
-elif page == "🌡️ 市场温度计":
-
-    temperature_page()
-
-else:
-
-    st.subheader(
-        "⚙️ V2.3.2 Mobile Fast"
-    )
-
-    st.write(
-        """
-**快速层**
-
-行情 → MA → MACD → RSI → 动量 → ATR → 风险 → 5/20/60日情景
-
-**按需层**
-
-基本面 / 估值  
-行业景气  
-资金流  
-订单 / 公告  
-市场温度
-
-**数据原则**
-
-数据缺失显示“-- / 暂缺”，不当作0分。
-
-**实验原则**
-
-本版本先运行一周，再根据实际预测结果调整参数。
-"""
-    )
-
-st.divider()
-
-st.caption(
-    "A股工程控制论 V2.3.2 Mobile Fast"
-)
+        st.caption(
+            "AKShare数据接口偶尔会临时波动。"
+            "可以稍后重试，或检查股票代码是否为6位A股代码。"
+        )
